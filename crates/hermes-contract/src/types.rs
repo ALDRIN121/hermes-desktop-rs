@@ -65,11 +65,11 @@ pub struct HermesApiRequest {
     pub method: Option<String>,
     #[serde(default)]
     pub body: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub profile: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<serde_json::Value>,
     #[serde(default)]
     pub priority: Option<String>,
@@ -115,4 +115,21 @@ pub struct UiPreferences {
 
 fn default_version() -> u32 {
     1
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_renderer_camel_case_and_legacy_snake_case() {
+        for value in [
+            serde_json::json!({"path":"/api/config", "timeoutMs":60000,"connectionId":"remote"}),
+            serde_json::json!({"path":"/api/config", "timeout_ms":60000,"connection_id":"remote"}),
+        ] {
+            let request: HermesApiRequest = serde_json::from_value(value).unwrap();
+            assert_eq!(request.timeout_ms, Some(60000));
+            assert_eq!(request.connection_id, Some(serde_json::json!("remote")));
+        }
+    }
 }

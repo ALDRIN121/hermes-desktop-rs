@@ -4,20 +4,17 @@
 //! pretending to work.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::fs_ops;
 use crate::git_ops;
 use crate::system_ops;
-use hermes_contract::discovery;
 use hermes_contract::types::{HermesApiRequest, HermesConnection, UiPreferences};
+use hermes_contract::{native_gateway, scope};
 use serde_json::{json, Value};
 
 pub struct ShellState {
     pub home: PathBuf,
-    /// Attach is a process spawn, so the descriptor is reused briefly.
-    cached: Mutex<Option<(Instant, HermesConnection, String)>>,
     pub terminals: std::sync::Arc<crate::terminal::TerminalState>,
     keep_awake: crate::system_ops::KeepAwake,
     zoom: crate::system_ops::Zoom,
@@ -27,43 +24,149 @@ impl ShellState {
     pub fn new(home: PathBuf) -> Self {
         Self {
             home,
-            cached: Mutex::new(None),
             terminals: std::sync::Arc::new(crate::terminal::TerminalState::default()),
             keep_awake: crate::system_ops::KeepAwake::default(),
             zoom: crate::system_ops::Zoom::default(),
         }
     }
+}
 
-    fn attach(&self) -> Result<(HermesConnection, String), String> {
-        if let Some((at, conn, instance)) = self.cached.lock().unwrap().as_ref() {
-            if at.elapsed() < Duration::from_secs(5) {
-                return Ok((conn.clone(), instance.clone()));
+fn resolve_native(home: &Path, payload: &Value) -> Result<native_gateway::NativeGateway, String> {
+    let profile = scope::requested_profile(payload)?;
+    native_gateway::resolve(home, profile.as_deref())
+}
+
+async fn resolve_native_async(
+    home: PathBuf,
+    payload: Value,
+) -> Result<native_gateway::NativeGateway, String> {
+    tauri::async_runtime::spawn_blocking(move || resolve_native(&home, &payload))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn owned_api_call(home: &Path, mut request: HermesApiRequest) -> Result<Value, String> {
+    scope::require_local_connection(request.connection_id.as_ref())?;
+    let route = scope::route_http(
+        &request.path,
+        request.method.as_deref().unwrap_or("GET"),
+        request.body.as_ref(),
+        request.profile.as_ref(),
+    )?;
+    let owner = native_gateway::resolve(home, route.profile.as_deref())?;
+    let ticket = owner.mint(route.purpose)?;
+    request.path = route.path;
+    api_call(&owner.connection, Some(&ticket), &request)
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+    #[test]
+    fn foreign_connection_and_conflicting_profile_never_touch_the_default_home() {
+        let absent = Path::new("/not-a-hermes-fixture-home");
+        let foreign: HermesApiRequest = serde_json::from_value(
+            json!({"path":"/api/config","connectionId":"remote","method":"PATCH","body":{"x":1}}),
+        )
+        .unwrap();
+        assert!(owned_api_call(absent, foreign)
+            .unwrap_err()
+            .contains("not yet supported"));
+        let conflict: HermesApiRequest =
+            serde_json::from_value(json!({"path":"/api/config?profile=a","profile":"b"})).unwrap();
+        assert!(owned_api_call(absent, conflict)
+            .unwrap_err()
+            .contains("Conflicting"));
+    }
+
+    #[test]
+    fn actual_rest_request_uses_named_profile_and_its_private_grant() {
+        let home = std::env::temp_dir().join(format!("hermes-owned-api-{}", std::process::id()));
+        std::fs::create_dir(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let control_path = home.join("gateway.sock");
+        let control = UnixListener::bind(&control_path).unwrap();
+        std::fs::set_permissions(&control_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let http = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", http.local_addr().unwrap());
+        let profile_home = home.join("profiles/work");
+        let expected_home = profile_home.clone();
+        let control_home = home.clone();
+        let issuer = std::thread::spawn(move || {
+            for verb in ["resolve-profile", "session-ticket"] {
+                let (mut client, _) = control.accept().unwrap();
+                client
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(client.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["verb"], verb);
+                let result = if verb == "resolve-profile" {
+                    assert_eq!(request["params"]["home"], expected_home.to_str().unwrap());
+                    json!({"resolve_protocol":1,"state":"ready","attachable":true,"update_fenced":false,"endpoint":{
+                        "runtime_protocol":1,"api_origin":origin,"ws_url":origin.replacen("http:","ws:",1)+"/api/ws",
+                        "profile_id":expected_home,"control_home":control_home,"instance_id":"work-owner"
+                    }})
+                } else {
+                    assert_eq!(
+                        request["params"]["profile_id"],
+                        expected_home.to_str().unwrap()
+                    );
+                    assert_eq!(request["params"]["instance_id"], "work-owner");
+                    assert_eq!(request["params"]["purpose"], "native-http");
+                    assert!(request["params"].get("scope").is_none());
+                    json!({"ticket":"fixture-work-grant"})
+                };
+                writeln!(
+                    client,
+                    "{}",
+                    json!({"protocol":1,"id":1,"ok":true,"result":result})
+                )
+                .unwrap();
             }
-        }
-        let receipt = discovery::attach(&self.home, 10)?;
-        let conn = discovery::connection_from_receipt(&receipt);
-        let instance = receipt.endpoint.instance_id.clone().unwrap_or_default();
-        *self.cached.lock().unwrap() = Some((Instant::now(), conn.clone(), instance.clone()));
-        Ok((conn, instance))
-    }
-
-    fn connection(&self) -> Result<HermesConnection, String> {
-        self.attach().map(|(conn, _)| conn)
-    }
-
-    /// A REST grant for this profile. Electron mints one per call with the
-    /// `native-http` purpose; the gateway validates it per request.
-    fn rest_ticket(&self, instance: &str) -> Result<String, String> {
-        self.mint(instance, "native-http")
-    }
-
-    fn mint(&self, instance: &str, purpose: &str) -> Result<String, String> {
-        let profile = self.home.to_string_lossy().to_string();
-        discovery::mint_ticket(&self.home, instance, &profile, purpose)
-    }
-
-    fn forget(&self) {
-        *self.cached.lock().unwrap() = None;
+        });
+        let backend = std::thread::spawn(move || {
+            let (mut client, _) = http.accept().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(client.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            assert!(
+                request.starts_with("GET /api/config?profile=work HTTP/1.1"),
+                "{request}"
+            );
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("x-hermes-gateway-ticket: fixture-work-grant"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body = "{\"owner\":\"work\"}";
+            write!(client, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let request = serde_json::from_value(
+            json!({"path":"/api/config","profile":"work","connectionId":"local"}),
+        )
+        .unwrap();
+        let response = owned_api_call(&home, request);
+        issuer.join().unwrap();
+        backend.join().unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+        assert_eq!(response.unwrap()["owner"], "work");
     }
 }
 
@@ -92,10 +195,7 @@ fn arg(args: &[Value], index: usize) -> Value {
 
 /// Proxy one REST call to the resolved backend.
 ///
-/// Electron mints a private per-call grant here; the Rust shell sends the
-/// descriptor token, which is what the remote/token mode already uses. Local
-/// native mode answers 401 for guarded routes until the grant channel is
-/// ported — that failure is surfaced verbatim, not hidden.
+/// The owner and method-specific native grant have already been resolved.
 fn api_call(
     conn: &HermesConnection,
     ticket: Option<&str>,
@@ -114,7 +214,13 @@ fn api_call(
         .to_ascii_uppercase();
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(30_000));
 
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+    let builder = ureq::AgentBuilder::new().redirects(0);
+    let agent = if timeout.is_zero() {
+        builder
+    } else {
+        builder.timeout(timeout)
+    }
+    .build();
     let mut req = agent.request(&method, &format!("{base}{path}"));
     if let Some(ticket) = ticket {
         // Local native mode: a one-use grant minted over the control socket.
@@ -204,6 +310,7 @@ pub fn media_response(uri: &str) -> tauri::http::Response<Vec<u8>> {
 
 #[tauri::command]
 pub async fn hermes_ws_open(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     registry: tauri::State<'_, std::sync::Arc<crate::gateway_ws::SocketRegistry>>,
     url: String,
@@ -214,6 +321,7 @@ pub async fn hermes_ws_open(
         registry.inner().clone(),
         url,
         protocols.unwrap_or_default(),
+        window.label().to_owned(),
     )
     .await
 }
@@ -222,13 +330,10 @@ pub async fn hermes_ws_open(
 pub fn hermes_ws_send(
     registry: tauri::State<'_, std::sync::Arc<crate::gateway_ws::SocketRegistry>>,
     id: u64,
-    data: String,
+    data: Value,
+    binary: Option<bool>,
 ) -> Result<(), String> {
-    if crate::gateway_ws::send(registry.inner(), id, &data) {
-        Ok(())
-    } else {
-        Err("socket is not open".into())
-    }
+    crate::gateway_ws::send(registry.inner(), id, data, binary.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -248,10 +353,11 @@ pub async fn task_call(
     params: Value,
     timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
-    let (conn, instance) = state.attach()?;
-    let ticket = state.mint(&instance, "interactive")?;
+    let owner =
+        resolve_native_async(state.home.clone(), json!({"profile":params.get("profile")})).await?;
+    let ticket = owner.mint("interactive")?;
     let budget = std::time::Duration::from_millis(timeout_ms.unwrap_or(20_000));
-    crate::task_ops::call(&conn, &ticket, &method, params, budget).await
+    crate::task_ops::call(&owner.connection, &ticket, &method, params, budget).await
 }
 
 /// Submit a prompt to a session (attach + submit on one socket).
@@ -263,10 +369,18 @@ pub async fn task_submit(
     text: String,
     timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
-    let (conn, instance) = state.attach()?;
-    let ticket = state.mint(&instance, "interactive")?;
+    let owner = resolve_native_async(state.home.clone(), json!({"profile":profile})).await?;
+    let ticket = owner.mint("interactive")?;
     let budget = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
-    crate::task_ops::submit(&conn, &ticket, &session_id, &profile, &text, budget).await
+    crate::task_ops::submit(
+        &owner.connection,
+        &ticket,
+        &session_id,
+        &profile,
+        &text,
+        budget,
+    )
+    .await
 }
 
 /// Resource usage of the gateway process the shell is attached to.
@@ -332,7 +446,10 @@ pub fn shell_diag(payload: Value) {
         .map(|label| format!("-{label}"))
         .unwrap_or_default();
     let path = dir.join(format!("hermes-rust-diag{suffix}.json"));
-    let _ = std::fs::write(&path, serde_json::to_vec_pretty(&payload).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&payload).unwrap_or_default(),
+    );
     eprintln!("diag{}: {}", suffix, payload);
 }
 
@@ -426,25 +543,30 @@ pub async fn hermes_ipc(
         "hermes:hud:windowing" => Ok(Value::Null),
 
         "hermes:connection" | "hermes:connection:for" => {
-            let conn = state.connection()?;
-            Ok(serde_json::to_value(conn).map_err(|e| e.to_string())?)
+            let owner = resolve_native_async(state.home.clone(), arg(&args, 0)).await?;
+            Ok(serde_json::to_value(owner.connection).map_err(|e| e.to_string())?)
         }
 
         "hermes:connection:revalidate" => {
-            state.forget();
-            let rebuilt = state.connection().is_ok();
+            let rebuilt = resolve_native_async(state.home.clone(), arg(&args, 0))
+                .await
+                .is_ok();
             Ok(json!({ "ok": rebuilt, "rebuilt": rebuilt }))
         }
 
         "hermes:gateway:ws-url" | "hermes:gateway:ws-url-for" => {
-            let (conn, instance) = state.attach()?;
+            let owner = resolve_native_async(state.home.clone(), arg(&args, 0)).await?;
             // The renderer turns `?native_dial=1&ticket=…` into the
             // `hermes-gateway-ticket.*` subprotocol itself (canonical-protocol.ts).
-            let ticket = state.mint(&instance, "interactive")?;
-            let sep = if conn.ws_url.contains('?') { '&' } else { '?' };
+            let ticket = owner.mint("interactive")?;
+            let sep = if owner.connection.ws_url.contains('?') {
+                '&'
+            } else {
+                '?'
+            };
             Ok(json!({
                 "ok": true,
-                "wsUrl": format!("{}{}native_dial=1&ticket={}", conn.ws_url, sep, ticket)
+                "wsUrl": format!("{}{}native_dial=1&ticket={}", owner.connection.ws_url, sep, ticket)
             }))
         }
 
@@ -476,15 +598,12 @@ pub async fn hermes_ipc(
         }
 
         "hermes:api" => {
-            let (conn, instance) = state.attach()?;
             let request: HermesApiRequest = serde_json::from_value(arg(&args, 0))
                 .map_err(|e| format!("bad HermesApiRequest: {e}"))?;
-            let ticket = state.rest_ticket(&instance).ok();
-            tauri::async_runtime::spawn_blocking(move || {
-                api_call(&conn, ticket.as_deref(), &request)
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            let home = state.home.clone();
+            tauri::async_runtime::spawn_blocking(move || owned_api_call(&home, request))
+                .await
+                .map_err(|e| e.to_string())?
         }
 
         // --- filesystem, dialogs, clipboard ---------------------------------
@@ -507,29 +626,25 @@ pub async fn hermes_ipc(
         "hermes:data-url-read-max:get" => Ok(fs_ops::data_url_read_max_state(&state.home)),
 
         "hermes:data-url-read-max:set" => {
-            let max_mb = arg(&args, 0).as_u64().unwrap_or(fs_ops::DATA_URL_DEFAULT_MAX_MB);
+            let max_mb = arg(&args, 0)
+                .as_u64()
+                .unwrap_or(fs_ops::DATA_URL_DEFAULT_MAX_MB);
             fs_ops::set_data_url_read_max_mb(&state.home, max_mb)
         }
 
-        "hermes:fs:readDir" => Ok(fs_ops::read_dir(
-            arg(&args, 0).as_str().unwrap_or_default(),
-        )),
+        "hermes:fs:readDir" => Ok(fs_ops::read_dir(arg(&args, 0).as_str().unwrap_or_default())),
 
-        "hermes:fs:gitRoot" => Ok(fs_ops::git_root(
-            arg(&args, 0).as_str().unwrap_or_default(),
-        )),
+        "hermes:fs:gitRoot" => Ok(fs_ops::git_root(arg(&args, 0).as_str().unwrap_or_default())),
 
         "hermes:fs:reveal" => Ok(Value::Bool(fs_ops::reveal(
             arg(&args, 0).as_str().unwrap_or_default(),
         ))),
 
-        "hermes:fs:openDir" => Ok(fs_ops::open_dir(
-            arg(&args, 0).as_str().unwrap_or_default(),
-        )),
+        "hermes:fs:openDir" => Ok(fs_ops::open_dir(arg(&args, 0).as_str().unwrap_or_default())),
 
-        "hermes:fs:desktopPluginsRoot" => Ok(Value::String(fs_ops::desktop_plugins_root(
-            &state.home,
-        ))),
+        "hermes:fs:desktopPluginsRoot" => {
+            Ok(Value::String(fs_ops::desktop_plugins_root(&state.home)))
+        }
 
         "hermes:fs:logsRoot" => Ok(Value::String(fs_ops::logs_root(
             &state.home,
@@ -751,7 +866,9 @@ pub async fn hermes_ipc(
             let repo = arg(&args, 0);
             let file = arg(&args, 1).as_str().map(str::to_string);
             tauri::async_runtime::spawn_blocking(move || match channel.as_str() {
-                "hermes:git:review:stage" => git_ops::stage(repo.as_str().unwrap_or_default(), file.as_deref()),
+                "hermes:git:review:stage" => {
+                    git_ops::stage(repo.as_str().unwrap_or_default(), file.as_deref())
+                }
                 "hermes:git:review:unstage" => {
                     git_ops::unstage(repo.as_str().unwrap_or_default(), file.as_deref())
                 }
@@ -837,7 +954,12 @@ pub async fn hermes_ipc(
         "hermes:git:scanRepos" => {
             let roots: Vec<String> = arg(&args, 0)
                 .as_array()
-                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             let max_depth = arg(&args, 1)
                 .get("maxDepth")
@@ -867,13 +989,18 @@ pub async fn hermes_ipc(
         "hermes:zoom:get" => {
             let state = system_ops::zoom_get(&state.zoom);
             let percent = state["percent"].as_f64().unwrap_or(100.0);
-            Ok(json!({ "level": percent / 100.0, "percent": percent }))
+            Ok(json!({ "level": (percent / 100.0).ln() / 1.2_f64.ln(), "percent": percent }))
         }
 
         "hermes:zoom:set-percent" => {
             let percent = arg(&args, 0).as_f64().unwrap_or(100.0);
-            let _ = window.set_zoom((percent / 100.0).clamp(0.5, 2.0));
-            Ok(system_ops::zoom_state(&state.zoom, percent))
+            window.set_zoom((percent / 100.0).clamp(0.5, 2.0)).map_err(|e| e.to_string())?;
+            let result = system_ops::zoom_state(&state.zoom, percent);
+            let percent = result["percent"].as_f64().unwrap_or(100.0);
+            let payload = json!({ "level": (percent / 100.0).ln() / 1.2_f64.ln(), "percent": percent });
+            use tauri::Emitter;
+            window.emit("hermes:zoom:changed", &payload).map_err(|e| e.to_string())?;
+            Ok(payload)
         }
 
         "hermes:keep-awake" => {
@@ -886,7 +1013,6 @@ pub async fn hermes_ipc(
         other => Err(format!("unimplemented:{other}")),
     }
 }
-
 
 /// Receives the renderer's UI audit report and appends it to a per-width file,
 /// so a sweep over several window sizes can be diffed afterwards.
@@ -906,7 +1032,10 @@ pub fn task_audit(payload: String) -> Result<String, String> {
         reports.push(value);
     }
     reports.sort_by_key(|report| report.get("width").and_then(|w| w.as_u64()).unwrap_or(0));
-    std::fs::write(&path, serde_json::to_vec_pretty(&reports).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&reports).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
 }

@@ -2,17 +2,24 @@
 
 A Rust (Tauri) shell for the Hermes desktop app.
 
-The renderer is the shipped Hermes web bundle, unmodified. The privileged half
+The source-built Hermes UI runs inside the native Tauri application. Normal
+startup opens the unified Hermes window; it does not launch Chrome. The privileged half
 that Electron's main process used to own is Rust: window creation, the
 `window.hermesDesktop` bridge, local backend discovery, native grant minting,
 the REST proxy, the gateway WebSocket and the `hermes-media` protocol.
 
-See [PORT_REPORT.md](PORT_REPORT.md) for the measured port status.
+The Hermes gateway remains Python and presentation uses React/TypeScript inside
+the application's embedded WebView. This is not an all-Rust frontend rewrite.
+See [implementation progress](docs/implementation/PROGRESS.md),
+[native UI verification](docs/implementation/NATIVE_UI_REVIEW.md) and
+[PORT_REPORT.md](PORT_REPORT.md) for the current limits. Full parity is in progress.
 
 ## Run
 
 ```bash
-# ui/ is a copy of apps/desktop/dist from a Hermes install
+# Node >=26 and the pinned pnpm version are required for renderer builds.
+# Install renderer dependencies as described in renderer/README.md first.
+node scripts/build_renderer.mjs
 cargo run -p hermes-desktop-rust
 ```
 
@@ -31,7 +38,7 @@ hermes-rust task                   # open the task view (Codex-style layout)
 ```
 
 The app puts a template **H** icon in the macOS menu bar with
-**Open Hermes / Task view / Workspace / Quit**. Closing the chat window hides it
+**Open Hermes / Workspace review / Legacy task preview / Quit**. Closing the chat window hides it
 instead of quitting, so the menu-bar icon is the way back in — left-click the
 icon, or run `hermes-rust` again.
 
@@ -42,12 +49,17 @@ exits); there is never a second copy of the app.
 ## Test
 
 ```bash
-cargo test                              # contract + shell (32 tests, incl. a real PTY round trip)
+cargo test --workspace                  # contract + shell, including local socket/PTY fixtures
+node --test tests/ui/bridge-socket.test.mjs
 HERMES_SHELL_SELFTEST=1 cargo run -p hermes-desktop-rust
 cat "$TMPDIR/hermes-rust-diag.json"     # per-channel self-test results
 ```
 
-## Task view (`hermes-rust task`)
+## Legacy task preview (`hermes-rust task`)
+
+This earlier shell-owned prototype is an explicit comparison view. The main
+application is the source-built full Hermes renderer. The approved redesign and
+remaining acceptance work are in [the full plan](docs/superpowers/plans/2026-11-15-full-hermes-plan.md).
 
 Rebuilt as a four-column workspace: top bar (nav pills, repo, branch, status),
 left rail (new chat, search, pinned, sessions, scheduled jobs, capabilities,

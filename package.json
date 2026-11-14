@@ -1,0 +1,11 @@
+{
+  "name": "hermes-desktop-rust",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26" },
+  "scripts": {
+    "build:renderer": "node scripts/build_renderer.mjs",
+    "test:bridge": "node --test tests/ui/*.test.mjs",
+    "test:import": "python3 -m unittest discover -s tests -p 'test_*.py'"
+  }
+}

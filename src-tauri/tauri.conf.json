@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "ai.nous.hermes.rust-shell",
   "build": {
-    "frontendDist": "../ui"
+    "beforeBuildCommand": "node scripts/build_renderer.mjs",
+    "frontendDist": "../renderer/dist"
   },
   "app": {
     "withGlobalTauri": true,

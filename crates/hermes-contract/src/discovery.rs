@@ -12,7 +12,24 @@ use crate::types::{AttachReceipt, HermesConnection};
 
 /// Where to find the `hermes` launcher inside a normal install.
 pub fn default_launcher(home: &Path) -> PathBuf {
-    home.join(".hermes/hermes-agent/.hermes/bin/hermes")
+    home.join("hermes-agent/.hermes/bin/hermes")
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    #[test]
+    fn launcher_is_relative_to_resolved_hermes_home() {
+        assert_eq!(
+            default_launcher(Path::new("/users/example/.hermes")),
+            PathBuf::from("/users/example/.hermes/hermes-agent/.hermes/bin/hermes")
+        );
+        assert_eq!(
+            default_launcher(Path::new("/custom/home")),
+            PathBuf::from("/custom/home/hermes-agent/.hermes/bin/hermes")
+        );
+    }
 }
 
 /// Resolve the launcher: `HERMES_BIN` wins, then the install-local shim, then
@@ -208,8 +225,10 @@ mod ticket_tests {
             assert_eq!(value["verb"], "session-ticket");
             assert_eq!(value["params"]["purpose"], "native-http");
             assert!(value["params"].get("scope").is_none());
-            conn.write_all(b"{\"ok\":true,\"protocol\":1,\"id\":1,\"result\":{\"ticket\":\"T-1\"}}\n")
-                .unwrap();
+            conn.write_all(
+                b"{\"ok\":true,\"protocol\":1,\"id\":1,\"result\":{\"ticket\":\"T-1\"}}\n",
+            )
+            .unwrap();
             request
         });
 

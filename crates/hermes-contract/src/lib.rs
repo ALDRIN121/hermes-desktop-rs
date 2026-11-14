@@ -7,7 +7,9 @@
 
 pub mod channels;
 pub mod discovery;
+pub mod native_gateway;
 pub mod registry;
+pub mod scope;
 pub mod transport;
 pub mod types;
 

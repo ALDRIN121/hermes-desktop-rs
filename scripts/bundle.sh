@@ -2,7 +2,7 @@
 # Assemble a real .app bundle for the Rust shell so it can be launched from
 # Finder, the Dock, Spotlight — and from the `hermes-rust` command.
 #
-#   scripts/bundle.sh [debug|release]     # default: debug
+#   scripts/bundle.sh [debug|release] [output.app] [bundle-id] [display-name]
 #
 # The bundle is installed to ~/Applications/Hermes Rust.app.
 set -euo pipefail
@@ -10,7 +10,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${1:-debug}"
 BIN="$ROOT/target/$PROFILE/hermes-desktop-rust"
-APP="$HOME/Applications/Hermes Rust.app"
+APP="${2:-$HOME/Applications/Hermes Rust.app}"
+BUNDLE_ID="${3:-ai.nous.hermes.rust-shell}"
+BUNDLE_NAME="${4:-Hermes}"
 ICON_SRC="$ROOT/src-tauri/icons/icon.png"
 
 if [[ ! -x "$BIN" ]]; then
@@ -24,7 +26,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/hermes-desktop-rust"
 
 # .icns from the 1024px PNG: sips makes the sizes, iconutil packs them.
-ICONSET="$(mktemp -d)/AppIcon.iconset"
+ICON_TEMP="$(mktemp -d)"
+trap 'rm -rf "$ICON_TEMP"' EXIT
+ICONSET="$ICON_TEMP/AppIcon.iconset"
 mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
   sips -z $size $size "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
@@ -33,26 +37,20 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>Hermes Rust</string>
-  <key>CFBundleDisplayName</key><string>Hermes Rust</string>
-  <key>CFBundleIdentifier</key><string>com.aldrin.hermes-rust</string>
-  <key>CFBundleExecutable</key><string>hermes-desktop-rust</string>
-  <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-  <key>NSHighResolutionCapable</key><true/>
-  <key>NSRequiresAquaSystemAppearance</key><false/>
-</dict>
-</plist>
-PLIST
+python3 - "$APP/Contents/Info.plist" "$BUNDLE_ID" "$BUNDLE_NAME" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], 'wb') as output:
+    plistlib.dump({
+        'CFBundleName': sys.argv[3], 'CFBundleDisplayName': sys.argv[3],
+        'CFBundleIdentifier': sys.argv[2], 'CFBundleExecutable': 'hermes-desktop-rust',
+        'CFBundleIconFile': 'AppIcon', 'CFBundlePackageType': 'APPL',
+        'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '1',
+        'LSMinimumSystemVersion': '13.0',
+        'LSApplicationCategoryType': 'public.app-category.developer-tools',
+        'NSHighResolutionCapable': True, 'NSRequiresAquaSystemAppearance': False,
+        'NSMicrophoneUsageDescription': 'Hermes uses the microphone for dictation and voice conversations when you start them.',
+    }, output)
+PY
 
 # Ad-hoc signature: enough for local use, and keeps macOS from re-prompting for
 # permissions on every rebuild (the bundle identity stays stable).

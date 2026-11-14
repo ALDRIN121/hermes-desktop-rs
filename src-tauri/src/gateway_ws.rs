@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -54,6 +54,7 @@ pub async fn open(
     registry: std::sync::Arc<SocketRegistry>,
     url: String,
     protocols: Vec<String>,
+    target: String,
 ) -> Result<u64, String> {
     let mut request = url
         .as_str()
@@ -61,9 +62,10 @@ pub async fn open(
         .map_err(|e| format!("bad ws url: {e}"))?;
     if !protocols.is_empty() {
         let joined = protocols.join(", ");
-        request
-            .headers_mut()
-            .insert("sec-websocket-protocol", joined.parse().map_err(|e| format!("protocols: {e}"))?);
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            joined.parse().map_err(|e| format!("protocols: {e}"))?,
+        );
     }
 
     let (stream, _response) = tokio_tungstenite::connect_async(request)
@@ -89,19 +91,10 @@ pub async fn open(
         let app_in = app.clone();
         while let Some(next) = source.next().await {
             match next {
-                Ok(Message::Text(text)) => {
-                    let _ = app_in.emit_to(
-                        "main",
-                        "hermes-ws-message",
-                        json!({ "id": id, "data": text.to_string() }),
-                    );
-                }
-                Ok(Message::Binary(bytes)) => {
-                    let _ = app_in.emit_to(
-                        "main",
-                        "hermes-ws-message",
-                        json!({ "id": id, "data": String::from_utf8_lossy(&bytes) }),
-                    );
+                Ok(frame @ (Message::Text(_) | Message::Binary(_))) => {
+                    if let Some(payload) = message_payload(id, frame) {
+                        let _ = app_in.emit_to(target.as_str(), "hermes-ws-message", payload);
+                    }
                 }
                 Ok(Message::Ping(payload)) => {
                     let _ = registry_clone.with(id, |sender| {
@@ -110,9 +103,12 @@ pub async fn open(
                 }
                 Ok(Message::Close(frame)) => {
                     let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(1005);
-                    let reason = frame.as_ref().map(|f| f.reason.to_string()).unwrap_or_default();
+                    let reason = frame
+                        .as_ref()
+                        .map(|f| f.reason.to_string())
+                        .unwrap_or_default();
                     let _ = app_in.emit_to(
-                        "main",
+                        target.as_str(),
                         "hermes-ws-closed",
                         json!({ "id": id, "code": code, "reason": reason }),
                     );
@@ -121,7 +117,7 @@ pub async fn open(
                 Ok(_) => {}
                 Err(error) => {
                     let _ = app_in.emit_to(
-                        "main",
+                        target.as_str(),
                         "hermes-ws-closed",
                         json!({ "id": id, "code": 1006, "reason": error.to_string() }),
                     );
@@ -135,12 +131,66 @@ pub async fn open(
     Ok(id)
 }
 
-pub fn send(registry: &SocketRegistry, id: u64, data: &str) -> bool {
-    registry.with(id, |sender| sender.send(Message::Text(data.to_string())).is_ok())
+fn message_payload(id: u64, frame: Message) -> Option<Value> {
+    match frame {
+        Message::Text(text) => Some(json!({"id": id, "data": text, "binary": false})),
+        Message::Binary(bytes) => Some(json!({"id": id, "data": bytes, "binary": true})),
+        _ => None,
+    }
+}
+
+pub fn send(registry: &SocketRegistry, id: u64, data: Value, binary: bool) -> Result<(), String> {
+    let frame = if binary {
+        let bytes: Vec<u8> = serde_json::from_value(data).map_err(|_| "invalid binary frame")?;
+        Message::Binary(bytes)
+    } else {
+        Message::Text(data.as_str().ok_or("invalid text frame")?.to_owned())
+    };
+    if registry.with(id, |sender| sender.send(frame).is_ok()) {
+        Ok(())
+    } else {
+        Err("socket is not open".into())
+    }
 }
 
 pub fn close(registry: &SocketRegistry, id: u64) -> bool {
     let closed = registry.with(id, |sender| sender.send(Message::Close(None)).is_ok());
     registry.remove(id);
     closed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_audio_survives_both_ipc_directions() {
+        let registry = SocketRegistry::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let id = registry.insert(tx);
+        send(&registry, id, json!([0, 128, 255]), true).unwrap();
+        let frame = rx.try_recv().unwrap();
+        assert_eq!(frame, Message::Binary(vec![0, 128, 255]));
+        assert_eq!(
+            message_payload(id, frame),
+            Some(json!({
+                "id": id, "data": [0, 128, 255], "binary": true
+            }))
+        );
+    }
+
+    #[test]
+    fn text_remains_text_and_invalid_binary_is_rejected() {
+        let registry = SocketRegistry::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let id = registry.insert(tx);
+        send(&registry, id, json!("hello"), false).unwrap();
+        assert_eq!(
+            message_payload(id, rx.try_recv().unwrap()),
+            Some(json!({"id": id, "data": "hello", "binary": false}))
+        );
+        assert!(send(&registry, id, json!([256]), true).is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(send(&registry, id + 1, json!("hello"), false).is_err());
+    }
 }

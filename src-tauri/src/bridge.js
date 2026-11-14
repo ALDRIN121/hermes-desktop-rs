@@ -169,7 +169,11 @@
     zoom: {
       get: () => call('hermes:zoom:get'),
       setPercent: (percent) => send('hermes:zoom:set-percent', [percent]),
-      onChange: unsubscribe
+      factor: () => zoomFactor,
+      onChanged: (callback) => listen('hermes:zoom:changed', (payload) => {
+        zoomFactor = payload.percent / 100
+        callback(payload)
+      })
     },
 
     // --- embedded terminal ---------------------------------------------------
@@ -187,6 +191,8 @@
     // Shell-level introspection (Rust addition; the renderer ignores it).
     rustShell: { info: () => invoke('shell_info', {}) }
   }
+
+  let zoomFactor = 1
 
   // Anything not implemented here reads as absent, never as a broken stub —
   // except event subscriptions (`on*`), which Electron always provided and the
@@ -248,51 +254,84 @@
       this.onclose = null
       this.onerror = null
       this._id = null
+      this.binaryType = 'blob'
+      this._closed = false
       this._unlisten = []
+      this._pendingFrames = []
+      this._outgoing = Promise.resolve()
       this._entry = { url: redact(url), protocols: protocols ? [].concat(protocols).map(redact) : null, events: [] }
       socketLog.push(this._entry)
-
-      const list = protocols ? [].concat(protocols) : []
-      invoke('hermes_ws_open', { url: this.url, protocols: list })
-        .then((id) => {
-          this._id = id
-          this.readyState = 1 // OPEN
-          this._entry.events.push('open')
-          this._fire('open', new Event('open'))
-          this._subscribe()
-        })
-        .catch((error) => {
-          this.readyState = 3 // CLOSED
-          this._entry.events.push('error: ' + (error && error.message ? error.message : error))
-          this._fire('error', new Event('error'))
-          this._fire('close', new CloseEvent('close', { code: 1006, reason: String(error), wasClean: false }))
-        })
+      this._connect(protocols ? [].concat(protocols) : [])
     }
 
-    _subscribe() {
+    async _connect(protocols) {
+      try {
+        await this._subscribe()
+        if (this._closed) return
+        const id = await invoke('hermes_ws_open', { url: this.url, protocols })
+        this._id = id
+        if (this._closed) {
+          await invoke('hermes_ws_close', { id }).catch(() => undefined)
+          return
+        }
+        this.readyState = 1
+        this._entry.events.push('open')
+        this._fire('open', new Event('open'))
+        const pending = this._pendingFrames
+        this._pendingFrames = []
+        for (const [kind, payload] of pending) this._receive(kind, payload)
+      } catch (error) {
+        if (this._closed) return
+        this._entry.events.push('error')
+        this._fire('error', new Event('error'))
+        this._finishClose(1006, 'Gateway connection failed')
+      }
+    }
+
+    async _subscribe() {
       const events = window.__TAURI__ && window.__TAURI__.event
-      if (!events) return
-      events
-        .listen('hermes-ws-message', (event) => {
+      if (!events) throw new Error('tauri events unavailable')
+      for (const [channel, kind] of [['hermes-ws-message', 'message'], ['hermes-ws-closed', 'close']]) {
+        const unlisten = await events.listen(channel, event => {
+          if (this._closed) return
           const payload = event.payload || {}
-          if (payload.id !== this._id) return
-          this._entry.events.push('message')
-          this._fire('message', new MessageEvent('message', { data: payload.data }))
+          if (this._id === null) {
+            // A native socket may produce a greeting before its open IPC resolves.
+            // Keep this bounded across concurrent sockets; overflow fails visibly.
+            if (this._pendingFrames.length >= 256) {
+              this._fire('error', new Event('error'))
+              this._finishClose(1006, 'Gateway startup buffer exceeded')
+            } else this._pendingFrames.push([kind, payload])
+          } else this._receive(kind, payload)
         })
-        .then((un) => this._unlisten.push(un))
-      events
-        .listen('hermes-ws-closed', (event) => {
-          const payload = event.payload || {}
-          if (payload.id !== this._id) return
-          this.readyState = 3
-          this._entry.events.push('close ' + payload.code + ' ' + redact(payload.reason))
-          this._fire('close', new CloseEvent('close', {
-            code: payload.code || 1006,
-            reason: payload.reason || '',
-            wasClean: payload.code === 1000
-          }))
-        })
-        .then((un) => this._unlisten.push(un))
+        if (this._closed) unlisten()
+        else this._unlisten.push(unlisten)
+      }
+    }
+
+    _receive(kind, payload) {
+      if (this._closed || payload.id !== this._id) return
+      if (kind === 'close') {
+        this._finishClose(payload.code || 1006, payload.reason || '')
+        return
+      }
+      let data = payload.data
+      if (payload.binary) {
+        const bytes = new Uint8Array(data)
+        data = this.binaryType === 'arraybuffer' ? bytes.buffer : new Blob([bytes])
+      }
+      this._entry.events.push('message')
+      this._fire('message', new MessageEvent('message', { data }))
+    }
+
+    _finishClose(code, reason) {
+      if (this._closed) return
+      this._closed = true
+      this.readyState = 3
+      for (const unlisten of this._unlisten) unlisten()
+      this._unlisten = []
+      this._pendingFrames = []
+      this._fire('close', new CloseEvent('close', { code, reason, wasClean: code === 1000 }))
     }
 
     _fire(type, event) {
@@ -308,20 +347,29 @@
     }
 
     send(data) {
+      if (this.readyState === 0) throw new Error('WebSocket is still connecting')
       if (this.readyState !== 1 || this._id === null) return
-      invoke('hermes_ws_send', { id: this._id, data: String(data) }).catch(() => undefined)
+      const id = this._id
+      // Blob conversion is asynchronous: queue every frame to retain send order.
+      this._outgoing = this._outgoing.then(async () => {
+        if (this._closed) return
+        let binary = false
+        if (data instanceof Blob) data = await data.arrayBuffer()
+        if (data instanceof ArrayBuffer) {
+          data = Array.from(new Uint8Array(data)); binary = true
+        } else if (ArrayBuffer.isView(data)) {
+          data = Array.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)); binary = true
+        } else data = String(data)
+        await invoke('hermes_ws_send', { id, data, binary })
+      }).catch(() => {
+        if (!this._closed) this._fire('error', new Event('error'))
+      })
     }
 
     close() {
+      if (this._closed) return
       if (this._id !== null) invoke('hermes_ws_close', { id: this._id }).catch(() => undefined)
-      this.readyState = 3
-      this._unlisten.forEach((un) => {
-        try {
-          un()
-        } catch {}
-      })
-      this._unlisten = []
-      this._fire('close', new CloseEvent('close', { code: 1005, reason: '', wasClean: true }))
+      this._finishClose(1000, '')
     }
   }
 
@@ -440,8 +488,10 @@
   }
   const pending = boot.selfTest === true ? selfTest() : Promise.resolve(null)
 
-  setTimeout(report, 5000)
-  setTimeout(report, 15000)
+  if (boot.selfTest === true) {
+    setTimeout(report, 5000)
+    setTimeout(report, 15000)
+  }
 
   window.__hermesRustShell = true
 })()

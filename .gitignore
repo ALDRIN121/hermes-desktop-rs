@@ -4,3 +4,8 @@ node_modules/
 .DS_Store
 *.log
 .egm/raw/
+.pnpm-store/
+__pycache__/
+renderer/dist/
+.superpowers/
+.playwright-mcp/

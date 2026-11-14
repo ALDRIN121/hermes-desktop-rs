@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/hermes-contract", "src-tauri"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+lto = true
+opt-level = "s"
+strip = true

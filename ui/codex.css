@@ -1,0 +1,113 @@
+/* Workspace window: a review surface for a repository.
+   Deliberately its own small stylesheet — this window is shell-owned UI, not the
+   Hermes renderer, so it must not depend on the renderer's bundle. */
+
+:root {
+  --bg: #0f1115;
+  --panel: #161a21;
+  --panel-2: #1c222b;
+  --line: #262d38;
+  --text: #e6e9ef;
+  --muted: #8b94a3;
+  --accent: #5b9dff;
+  --add: #3fb950;
+  --del: #f85149;
+  --warn: #d29922;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+#app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
+
+header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+header .title { font-weight: 600; margin-right: 4px; }
+header .spacer { flex: 1; }
+
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+button:hover { border-color: #3a4453; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #08111f; font-weight: 600; }
+
+main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+
+#files {
+  border-right: 1px solid var(--line);
+  overflow: auto;
+  min-height: 0;
+}
+
+.file {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid #1b212a;
+  cursor: pointer;
+}
+.file:hover { background: var(--panel); }
+.file.active { background: var(--panel-2); }
+.file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .status { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+.file .counts { font-family: ui-monospace, monospace; font-size: 11px; display: flex; gap: 6px; }
+.add { color: var(--add); }
+.del { color: var(--del); }
+
+#diff {
+  overflow: auto;
+  min-height: 0;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  padding: 10px 12px;
+  tab-size: 2;
+}
+
+.line { display: block; }
+.line.add { color: var(--add); background: rgba(63, 185, 80, .08); }
+.line.del { color: var(--del); background: rgba(248, 81, 73, .08); }
+.line.hunk { color: var(--accent); }
+.line.meta { color: var(--muted); }
+
+.statusbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+.statusbar .pill {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.empty { color: var(--muted); padding: 24px; text-align: center; }

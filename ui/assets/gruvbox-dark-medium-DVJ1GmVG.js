@@ -1,0 +1,1 @@
+export{on as default}from"./shiki-BYoDfLvR.js";

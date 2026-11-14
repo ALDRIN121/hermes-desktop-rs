@@ -1,0 +1,1 @@
+export{Gc as default}from"./shiki-BYoDfLvR.js";

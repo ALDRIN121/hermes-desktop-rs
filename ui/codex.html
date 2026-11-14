@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hermes Workspace</title>
+    <link rel="stylesheet" href="./codex.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <span class="title">Workspace</span>
+        <select id="repo-picker" title="Repository"></select>
+        <span id="repo-label" class="muted"></span>
+        <span class="spacer"></span>
+        <button id="btn-refresh">Refresh</button>
+        <button id="btn-stage">Stage</button>
+        <button id="btn-unstage">Unstage</button>
+        <button id="btn-revert">Revert</button>
+      </header>
+      <main>
+        <div id="files"><div class="empty">Loading changed files…</div></div>
+        <div id="diff"></div>
+      </main>
+      <div class="statusbar">
+        <span id="branch-pill" class="pill">—</span>
+        <span id="sync-pill" class="pill">—</span>
+        <span id="counts-pill" class="pill">—</span>
+        <span class="spacer" style="flex:1"></span>
+        <span id="status">ready</span>
+      </div>
+    </div>
+    <script type="module" src="./codex.js"></script>
+  </body>
+</html>

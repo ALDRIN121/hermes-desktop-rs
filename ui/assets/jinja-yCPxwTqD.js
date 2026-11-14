@@ -1,0 +1,1 @@
+export{Ki as default}from"./shiki-BYoDfLvR.js";

@@ -1,0 +1,37 @@
+#!/bin/sh
+# hermes-rust — open the Rust Hermes desktop shell.
+#
+#   hermes-rust              open (or focus) the chat window
+#   hermes-rust workspace    open the repository review window
+#   hermes-rust --help
+#
+# Launches through `open -n` so a second invocation reaches the running instance
+# (the app forwards its argv to the first process and exits); it never starts a
+# duplicate app.
+set -eu
+
+APP="$HOME/Applications/Hermes Rust.app"
+
+usage() {
+  cat <<'USAGE'
+usage: hermes-rust [workspace]
+
+  (no argument)   open or focus the Hermes window
+  workspace       open the repository review window
+
+Notes: the shell keeps running in the menu bar when its window is closed.
+Quit it from the menu-bar icon, or with Cmd+Q.
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help|help) usage; exit 0 ;;
+esac
+
+if [ ! -d "$APP" ]; then
+  echo "hermes-rust: $APP not found" >&2
+  echo "  build it with: ~/Developer/hermes-desktop-rs/scripts/bundle.sh" >&2
+  exit 1
+fi
+
+exec open -n "$APP" --args "$@"

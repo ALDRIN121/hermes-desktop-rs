@@ -1,0 +1,1 @@
+export{Ms as default}from"./shiki-BYoDfLvR.js";

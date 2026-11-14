@@ -21,7 +21,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
 import { displayPath, pathLeaf } from '@/lib/display-path'
-import { statusBarGatewayHealth } from '@/lib/gateway-health-pill'
+import { gatewayPillClassName, statusBarGatewayHealth } from '@/lib/gateway-health-pill'
 import {
   Activity,
   AlertCircle,
@@ -404,7 +404,6 @@ export function useStatusbarItems({
   )
 
   const gatewayOpen = gatewayState === 'open'
-  const gatewayConnecting = gatewayState === 'connecting'
 
   const gatewayHealth = statusBarGatewayHealth({
     connectionState: gatewayState,
@@ -428,13 +427,19 @@ export function useStatusbarItems({
   })
 
   const inferenceReady = gatewayOpen && inferenceStatus?.ready === true && !gatewayHealth.degraded
-  const gatewayDegraded = gatewayOpen || gatewayConnecting || gatewayHealth.degraded
 
-  const gatewayClassName = inferenceReady
-    ? undefined
-    : gatewayDegraded
-      ? 'text-amber-600 hover:text-amber-600'
-      : 'text-destructive hover:text-destructive'
+  // No readiness answer yet is not a warning: an unfocused window deliberately
+  // defers the check, and painting amber "checking" over a backend that is
+  // already up reads as a fault the user cannot clear. Stay neutral until the
+  // check has actually answered; a real not-ready verdict still colours below.
+  const readinessUnanswered = inferenceStatus === null && gatewayOpen && !gatewayHealth.degraded
+
+  const gatewayClassName = gatewayPillClassName({
+    connectionState: gatewayState,
+    degraded: gatewayHealth.degraded,
+    inferenceReady,
+    inferenceStatus
+  })
 
   const rollbackBody = t.settings.about.channel.rollbackBody
 
@@ -536,7 +541,7 @@ export function useStatusbarItems({
       },
       {
         className: gatewayRestarting ? undefined : gatewayClassName,
-        detail: gatewayHealth.detail,
+        detail: readinessUnanswered ? undefined : gatewayHealth.detail,
         hidden: botsShowing,
         icon: gatewayRestarting ? (
           <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
@@ -683,6 +688,7 @@ export function useStatusbarItems({
       gatewayMenuContent,
       gatewayClassName,
       gatewayHealth,
+      readinessUnanswered,
       gatewayRestarting,
       inferenceReady,
       inferenceStatus?.reason,

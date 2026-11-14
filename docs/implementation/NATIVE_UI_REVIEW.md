@@ -77,4 +77,14 @@ The read-only fixture had been returning object wrappers where the API returns b
 - **Vocabulary drifts inside Automations**: the rail says Automations, the panel says "Scheduled jobs" and the primary action says **"New cron"**.
 - **The backend pill flaps** between "Backend ready" and amber "Backend checking" across launches and navigations on the same connection; the readiness store is cleared on a state change that the socket never actually left.
 
+### Fixed in this pass
+
+- **Tasks & agents now opens with a work board** (`src/app/agents/board.tsx`): one row per unit of work, aggregated from the stores the app already keeps — live and terminal subagents, plus every session's todo list — into In progress / Queued / Finished columns, capped at six finished rows, each row naming its session and owner. Empty stores render one honest line, never an invented row. `buildBoard`/`boardColumns` are pure and tested (`board.test.tsx`, 3 tests).
+- **Automations speaks one vocabulary**: panel title, count, empty state, search and loading copy, create/edit titles, failure toasts and the command-palette entry now say automations, not "scheduled jobs" or "New cron".
+- **The pill no longer claims a fault it cannot see.** The amber came from `gatewayOpen` in the status-bar class, so an *unanswered* readiness check on a healthy socket painted "Backend checking". The rule moved into `gatewayPillClassName` (`gateway-health-pill.ts`, 3 new tests): ready → uncoloured, unanswered-but-open → uncoloured and no detail word, connecting/messaging-down → amber, answered-not-ready on a closed socket → destructive. The focus-gated polling itself is untouched — upstream tests assert it deliberately.
+
+### Development-loop gotcha (cost two verification rounds)
+
+The frontend is **embedded in the binary** by `tauri::generate_context!`; the app bundle carries no `Resources/assets`. Rebuilding the renderer alone therefore leaves the running app on the previous UI, and clearing the WebView cache does not help. Always `node scripts/build_renderer.mjs && cargo build -p hermes-desktop-rust` before re-bundling, then verify the new copy actually appears.
+
 The guided voice setup is integrated but has not been exercised against a real microphone or provider. The All settings catalogue, complete native connector/auth/media/window parity, full run replay/gap/report handling, compact-window and keyboard acceptance and performance baselines remain incomplete. This is a native implementation checkpoint, not a full-product acceptance claim.

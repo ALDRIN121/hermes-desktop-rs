@@ -2077,6 +2077,13 @@ export interface Translations extends NoticeTranslations {
     files: string
     moreFiles: (count: number) => string
     moreAgents: (count: number) => string
+    board: string
+    boardLive: string
+    boardNext: string
+    boardDone: string
+    boardEmpty: string
+    boardItems: (count: number) => string
+    boardSessionUnknown: string
     queued: string
     waitingActivity: string
     steer: string

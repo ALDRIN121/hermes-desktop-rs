@@ -81,6 +81,32 @@ function inferenceDetail(copy: GatewayHealthPillCopy, inferenceStatus: RuntimeRe
   }[runtimeReadinessDisplay(inferenceStatus)]
 }
 
+/** Amber while the backend is connectable-but-unproven or messaging is down;
+ *  red once a verdict says it cannot serve. An unanswered readiness check on an
+ *  OPEN socket is deliberately colourless: an unfocused window defers the check
+ *  by design, and amber "checking" over a healthy backend reads as a fault the
+ *  user cannot clear. */
+export function gatewayPillClassName(input: {
+  connectionState: string
+  degraded: boolean
+  inferenceReady: boolean
+  inferenceStatus: RuntimeReadinessResult | null
+}): string | undefined {
+  if (input.inferenceReady) {
+    return undefined
+  }
+
+  const open = input.connectionState === 'open'
+
+  if (input.inferenceStatus === null && open && !input.degraded) {
+    return undefined
+  }
+
+  return open || input.connectionState === 'connecting' || input.degraded
+    ? 'text-amber-600 hover:text-amber-600'
+    : 'text-destructive hover:text-destructive'
+}
+
 export function statusBarGatewayHealth({
   connectionState,
   copy,

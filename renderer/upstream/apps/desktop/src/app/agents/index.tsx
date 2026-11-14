@@ -24,6 +24,8 @@ import {
 
 import { Panel, PanelEmpty, PanelHeader } from '../overlays/panel'
 
+import { TaskBoard } from './board'
+
 // Mirrors statusGlyph() in tool-fallback.tsx so subagent rows speak the
 // same visual vocabulary as the chat tool blocks.
 function statusGlyph(status: SubagentStatus, a: Translations['agents']): ReactNode {
@@ -98,6 +100,7 @@ export function AgentsView({ onClose }: AgentsViewProps) {
 
   return (
     <Panel closeLabel={t.agents.close} onClose={onClose}>
+      <TaskBoard />
       {tree.length === 0 ? (
         <PanelEmpty description={t.agents.emptyDesc} icon="hubot" title={t.agents.emptyTitle} />
       ) : (

@@ -5070,6 +5070,8 @@
     "uv.lock": "d0ae8bfd20db7a8ca0e75418df718315c58088b120366227cc62ee8fe25d4274"
   },
   "localAdditions": [
+    "apps/desktop/src/app/agents/board.test.tsx",
+    "apps/desktop/src/app/agents/board.tsx",
     "apps/desktop/src/app/overlays/overlay-view.test.tsx",
     "apps/desktop/src/app/right-sidebar/run-evidence.test.ts",
     "apps/desktop/src/app/right-sidebar/run-evidence.ts",
@@ -5085,6 +5087,7 @@
   ],
   "localChanges": [
     "apps/desktop/DESIGN.md",
+    "apps/desktop/src/app/agents/index.tsx",
     "apps/desktop/src/app/capabilities/catalog/catalog-data.ts",
     "apps/desktop/src/app/chat/sidebar/chat-sidebar.integration.test.tsx",
     "apps/desktop/src/app/chat/sidebar/index.tsx",
@@ -5096,6 +5099,11 @@
     "apps/desktop/src/app/settings/profile-scope.test.tsx",
     "apps/desktop/src/app/settings/profile-scope.tsx",
     "apps/desktop/src/app/settings/subpage-navigation.tsx",
+    "apps/desktop/src/app/shell/hooks/use-statusbar-items.tsx",
+    "apps/desktop/src/i18n/en.ts",
+    "apps/desktop/src/i18n/types.ts",
+    "apps/desktop/src/lib/gateway-health-pill.test.ts",
+    "apps/desktop/src/lib/gateway-health-pill.ts",
     "apps/desktop/src/store/composer-status.ts",
     "apps/desktop/src/themes/presets.ts"
   ],

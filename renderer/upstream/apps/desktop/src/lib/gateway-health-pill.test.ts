@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { en } from '@/i18n/en'
 
-import { statusBarGatewayHealth } from './gateway-health-pill'
+import { gatewayPillClassName, statusBarGatewayHealth } from './gateway-health-pill'
 
 const copy = {
   backend: en.shell.statusbar.backend,
@@ -76,5 +76,31 @@ describe('statusBarGatewayHealth', () => {
     })
 
     expect(pill.detail).toBe(copy.messagingDegraded('workhorse:whatsapp'))
+  })
+})
+
+describe('gatewayPillClassName', () => {
+  const ready = { checksDisagree: false, ready: true, reason: null, source: 'runtime_check' } as const
+  const notReady = { checksDisagree: false, ready: false, reason: 'no key', source: 'runtime_check' } as const
+
+  it('stays colourless when readiness simply has not answered on an open socket', () => {
+    expect(gatewayPillClassName({ connectionState: 'open', degraded: false, inferenceReady: false, inferenceStatus: null }))
+      .toBeUndefined()
+  })
+
+  it('colours a real verdict, a connecting socket and a degraded gateway', () => {
+    expect(gatewayPillClassName({ connectionState: 'open', degraded: false, inferenceReady: false, inferenceStatus: notReady }))
+      .toMatch(/amber/)
+    expect(gatewayPillClassName({ connectionState: 'connecting', degraded: false, inferenceReady: false, inferenceStatus: null }))
+      .toMatch(/amber/)
+    expect(gatewayPillClassName({ connectionState: 'open', degraded: true, inferenceReady: false, inferenceStatus: null }))
+      .toMatch(/amber/)
+    expect(gatewayPillClassName({ connectionState: 'closed', degraded: false, inferenceReady: false, inferenceStatus: notReady }))
+      .toMatch(/destructive/)
+  })
+
+  it('leaves a ready backend uncoloured', () => {
+    expect(gatewayPillClassName({ connectionState: 'open', degraded: false, inferenceReady: true, inferenceStatus: ready }))
+      .toBeUndefined()
   })
 })

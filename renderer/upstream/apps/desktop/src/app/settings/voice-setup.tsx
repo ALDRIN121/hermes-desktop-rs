@@ -1,6 +1,9 @@
+import { AudioWaveform, Mic, TriangleAlert, Volume2 } from 'lucide-react'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { startVoiceLevelMeter } from '@/lib/voice-level-meter'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
@@ -98,6 +101,19 @@ function useMicrophoneCheck() {
   return { status, testing, level, start, cancel }
 }
 
+/** Amber until the microphone has actually delivered audio, then green. */
+function microphoneTone(status: string): 'muted' | 'success' | 'warn' {
+  if (status === 'Audio detected') {
+    return 'success'
+  }
+
+  if (status === 'Not tested' || /failed|blocked|unavailable|No audio/i.test(status)) {
+    return 'warn'
+  }
+
+  return 'muted'
+}
+
 /** Common voice setup; existing provider editors and advanced fields remain authoritative. */
 export function VoiceSetup({ config, schema, onChange }: {
   config: HermesConfigRecord; schema: Record<string, ConfigFieldSchema>; onChange: (config: HermesConfigRecord) => void
@@ -111,6 +127,14 @@ export function VoiceSetup({ config, schema, onChange }: {
     onChange={value => onChange(setConfigField(config, key, value))} schema={schema[key] ?? inferFieldSchema(getNested(config, key))}
     schemaKey={key}
     value={getNested(config, key)} />
+
+  const configured = (key: 'stt.provider' | 'tts.provider') => {
+    const value = getNested(config, key)
+
+    return typeof value === 'string' && value.trim() !== ''
+  }
+
+  const needsProviders = !configured('stt.provider') || !configured('tts.provider')
 
   return <div className="grid gap-6">
     <section aria-label="Conversation mode" className="border-y border-border py-5">
@@ -130,23 +154,48 @@ export function VoiceSetup({ config, schema, onChange }: {
       <h3 className="text-xl font-semibold">Get voice ready</h3>
       <p className="mt-2 text-sm text-muted-foreground">Set up your microphone and speech providers, then try voice in Chat.</p>
       <ol className="my-5 flex flex-wrap gap-x-8 gap-y-3 border-b border-border pb-5 text-sm">
-        <li><span className="mr-2 inline-flex size-7 items-center justify-center rounded-full bg-primary text-primary-foreground">1</span>Microphone</li>
-        <li><span className="mr-2 inline-flex size-7 items-center justify-center rounded-full border border-border">2</span>Speech providers</li>
-        <li><span className="mr-2 inline-flex size-7 items-center justify-center rounded-full border border-border">3</span>Try voice in Chat</li>
+        <li className="flex items-center"><span className="mr-2 inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">1</span>Microphone</li>
+        <li className="flex items-center"><span className="mr-2 inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border">2</span>Speech providers</li>
+        <li className="flex items-center"><span className="mr-2 inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border">3</span>Test conversation</li>
       </ol>
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-5">
-        <div><h4 className="font-semibold">Microphone</h4><p className="mt-1 text-sm text-muted-foreground" role="status">{microphone.status}</p>
-          {microphone.testing && <progress aria-label="Microphone input level" className="mt-2 h-2 w-48 accent-(--primary)" max={1} value={microphone.level} />}
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
+        <div className="flex items-start gap-3">
+          <Mic aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div>
+            <h4 className="font-semibold">Microphone</h4>
+            <p className="mt-1 text-sm text-muted-foreground">Choose the microphone Hermes will use.</p>
+            <div className="mt-2 flex items-center gap-2">
+              <Badge role="status" variant={microphoneTone(microphone.status)}><TriangleAlert aria-hidden />{microphone.status}</Badge>
+            </div>
+            {microphone.testing && <progress aria-label="Microphone input level" className="mt-2 h-2 w-48 accent-(--primary)" max={1} value={microphone.level} />}
+          </div>
         </div>
         <Button onClick={() => microphone.testing ? microphone.cancel() : void microphone.start()} variant="outline">{microphone.testing ? 'Cancel microphone test' : 'Test microphone…'}</Button>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">The microphone test stays on this device and stops after five seconds.</p>
-      <div className="mt-3 border-b border-border">{provider('stt.provider')}
-        <Button onClick={() => open('transcription')} size="inline" variant="text">Configure speech recognition</Button>
+      <div className="mt-3 flex items-start gap-3 border-b border-border pb-3">
+        <AudioWaveform aria-hidden className="mt-1 size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <h4 className="font-semibold">Speech recognition</h4>
+          <p className="mt-1 text-sm text-muted-foreground">Convert your speech to text (speech to text).</p>
+          {provider('stt.provider')}
+          <Button onClick={() => open('transcription')} size="inline" variant="text">Configure</Button>
+        </div>
       </div>
-      <div className="border-b border-border py-3">{provider('tts.provider')}
-        <Button onClick={() => open('speech')} size="inline" variant="text">Choose a voice and configure spoken replies</Button>
+      <div className="flex items-start gap-3 border-b border-border py-3">
+        <Volume2 aria-hidden className="mt-1 size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <h4 className="font-semibold">Spoken replies</h4>
+          <p className="mt-1 text-sm text-muted-foreground">Choose how Hermes speaks to you.</p>
+          {provider('tts.provider')}
+          <Button onClick={() => open('speech')} size="inline" variant="text">Choose a voice</Button>
+        </div>
       </div>
+      {needsProviders && <Alert className="mt-4" variant="warning">
+        <TriangleAlert aria-hidden />
+        <AlertTitle>Setup needed</AlertTitle>
+        <AlertDescription>Choose speech providers before starting a voice conversation.</AlertDescription>
+      </Alert>}
       <p className="mt-4 rounded-lg border border-border bg-card p-3 text-sm text-muted-foreground">Provider selection does not verify credentials or a working voice connection. Configure the providers before starting a conversation.</p>
       <div className="mt-4 flex flex-wrap gap-4">
         <Button onClick={() => navigate('/')} variant="outline">Open Chat to try voice</Button>

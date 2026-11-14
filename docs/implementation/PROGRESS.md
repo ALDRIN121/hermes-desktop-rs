@@ -27,6 +27,8 @@ Implementation authorized 15 November 2026. Working branch: `codex/full-hermes`.
 - Native route flag: `launch::tests` RED then GREEN 2/2; Rust workspace now 21 contract + 30 shell tests passed.
 - Renderer lint: 0 errors across all 24 touched files (6 warnings in the same classes pristine upstream test files already emit: `no-restricted-globals` for `document` and one `exhaustive-deps` on a cleanup that reads a ref on purpose). Before this pass the same files held 56 errors.
 - Focused renderer suite after the lint rewrite: 10 files, 52 tests passed. TypeScript check passed with an 8 GiB Node heap.
+- Scoped regression sweep over every directory the changes touch (`src/app/settings`, `src/app/right-sidebar`, `src/app/overlays`, `src/app/chat/sidebar`, `src/store`, `src/themes`, `src/app/shell`): 421 files, 3,883 tests passed in 485 s. The whole-tree run was started twice and abandoned after 20+ minutes without finishing; the scoped sweep is the evidence used instead.
+- Voice & audio concept pass: microphone badge, row icons and the "Setup needed" banner added; `voice-setup.test.tsx` 5/5 (badge is amber for an untested microphone, banner only while a provider is unset), lint 0 errors, TypeScript clean, renderer and host rebuilt, re-rendered in the native window.
 - Source renderer production build passed; Rust host rebuilt; isolated `Hermes UI Fixture.app` rebuilt and launched twice (plain, then `--route`). Settings → Voice & audio renders in the native window: nine settings categories, guided voice setup, mode cards, microphone check, provider rows.
 - New import tests: RED then GREEN 4/4.
 - New bridge tests: RED then GREEN 6/6, including native zoom events and no automatic transcript-capture timers on ordinary launches.

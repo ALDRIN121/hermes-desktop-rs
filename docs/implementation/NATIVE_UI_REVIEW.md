@@ -42,10 +42,8 @@ Matches the generated concept: three-column layout with the global rail, a setti
 
 Deltas still open (structure is right, detail is not yet the concept):
 
-- The microphone state is plain text, not the concept's amber warning badge; there is no amber "Setup needed" banner — a muted sentence states that provider selection does not verify credentials.
-- Rows have no leading icons, and the concept's "Configure" text links are buttons.
+- The microphone state badge, the "Setup needed" amber banner and the row icons are now present (badge amber until audio is detected, banner only while a speech provider is unset). Still missing: the concept's "Save changes" footer — settings apply on edit, so a disabled Save button would be a lie.
 - The scope control reads "Applies to · default · Local gateway"; the concept labels it "Personal profile · Local gateway".
-- The concept's footer ("No unsaved changes" + disabled "Save changes") does not exist because settings apply on edit; concept step 3 reads "Test conversation", the app says "Try voice in Chat".
-- The conversation-mode cards sit full width instead of beside the section heading, and the segmented sub-tab row leaves empty space to the right of its three pills.
+- The concept's step 3 now matches ("Test conversation"). Conversation-mode cards still sit full width instead of beside the section heading, and the segmented sub-tab row leaves empty space to the right of its three pills.
 
 The guided voice setup is integrated but has not been exercised against a real microphone or provider. The All settings catalogue, complete native connector/auth/media/window parity, full run replay/gap/report handling, compact-window and keyboard acceptance and performance baselines remain incomplete. This is a native implementation checkpoint, not a full-product acceptance claim.

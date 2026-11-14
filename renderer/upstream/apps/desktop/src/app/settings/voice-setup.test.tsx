@@ -37,3 +37,17 @@ it('reports missing microphone support without claiming a successful test', () =
   expect(screen.getByText(/Microphone capture is unavailable/)).toBeTruthy()
   expect(screen.queryByText('Audio detected')).toBeNull()
 })
+
+it('marks an untested microphone as a warning rather than neutral text', () => {
+  show({})
+  const badge = screen.getByText('Not tested')
+  expect(badge.className).toMatch(/amber/)
+})
+
+it('asks for setup only while a speech provider is missing', () => {
+  const missing = show({})
+  expect(screen.getByText('Setup needed')).toBeTruthy()
+  missing.unmount()
+  show({ stt: { provider: 'openai' }, tts: { provider: 'edge' } })
+  expect(screen.queryByText('Setup needed')).toBeNull()
+})

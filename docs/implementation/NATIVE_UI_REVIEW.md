@@ -36,4 +36,16 @@ Observed in the native window at 1360×900 (`computer_use` capture, dark theme):
 
 ## Still required
 
+### Concept fidelity — Voice & audio vs `04-full-hermes-settings-v1.png`
+
+Matches the generated concept: three-column layout with the global rail, a settings rail docked beside it, and the detail pane; the left-rail destinations and their order (Chat · Tasks & agents · Automations · Connections · Skills & tools · Library · Settings); search under the "Settings" heading with the "Find any setting…" placeholder; the nine categories in the concept's exact order with Voice & audio selected; page title → description → three sub-tabs; the Standard / Live conversation radio cards with Standard selected; the "Get voice ready" 1–2–3 stepper; a microphone row with "Not tested" + "Test microphone…"; provider rows; a collapsible "Advanced voice options" panel.
+
+Deltas still open (structure is right, detail is not yet the concept):
+
+- The microphone state is plain text, not the concept's amber warning badge; there is no amber "Setup needed" banner — a muted sentence states that provider selection does not verify credentials.
+- Rows have no leading icons, and the concept's "Configure" text links are buttons.
+- The scope control reads "Applies to · default · Local gateway"; the concept labels it "Personal profile · Local gateway".
+- The concept's footer ("No unsaved changes" + disabled "Save changes") does not exist because settings apply on edit; concept step 3 reads "Test conversation", the app says "Try voice in Chat".
+- The conversation-mode cards sit full width instead of beside the section heading, and the segmented sub-tab row leaves empty space to the right of its three pills.
+
 The guided voice setup is integrated but has not been exercised against a real microphone or provider. The All settings catalogue, complete native connector/auth/media/window parity, full run replay/gap/report handling, compact-window and keyboard acceptance and performance baselines remain incomplete. This is a native implementation checkpoint, not a full-product acceptance claim.

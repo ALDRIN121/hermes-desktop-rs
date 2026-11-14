@@ -84,3 +84,15 @@ test('native settings receives canonical zoom onChanged events and cleans the su
 test('ordinary app launches never schedule automatic transcript capture', () => {
   assert.equal(harness().timers.length, 0)
 })
+
+test('the shell provides requestIdleCallback where WebKit omits it', async () => {
+  const h = harness(), fired = []
+  assert.equal(typeof h.window.requestIdleCallback, 'function')
+  assert.equal(typeof h.window.cancelIdleCallback, 'function')
+  const cancelled = h.window.requestIdleCallback(() => fired.push('cancelled'))
+  h.window.requestIdleCallback(deadline => fired.push(deadline.didTimeout === false ? 'ran' : 'timeout'))
+  h.window.cancelIdleCallback(cancelled)
+  // Harness timers are captured, not run: deliver them the way a macrotask would.
+  for (const callback of h.timers) callback()
+  assert.deepEqual(fired, ['ran'])
+})

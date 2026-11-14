@@ -299,7 +299,19 @@ export function useCatalog(kind: CatalogKind) {
 
 /** Warm a catalog while the browser is idle so switching tabs doesn't pay the fetch + parse. */
 export function prefetchCatalogWhenIdle(kind: CatalogKind) {
-  const id = requestIdleCallback(() => void queryClient.prefetchQuery(catalogQuery(kind)), { timeout: 5_000 })
+  const run = () => void queryClient.prefetchQuery(catalogQuery(kind))
+
+  // WebKit (the Tauri shell) has no requestIdleCallback on older versions, and
+  // an unguarded call there takes the whole Capabilities view down at import
+  // time. Degrade to a short timer instead of crashing — same rule as
+  // components/idle-mount.tsx.
+  if (typeof requestIdleCallback !== 'function') {
+    const timer = setTimeout(run, 250)
+
+    return () => clearTimeout(timer)
+  }
+
+  const id = requestIdleCallback(run, { timeout: 5_000 })
 
   return () => cancelIdleCallback(id)
 }

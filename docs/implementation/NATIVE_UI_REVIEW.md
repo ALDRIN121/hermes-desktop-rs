@@ -46,4 +46,35 @@ Deltas still open (structure is right, detail is not yet the concept):
 - The scope control reads "Applies to · default · Local gateway"; the concept labels it "Personal profile · Local gateway".
 - The concept's step 3 now matches ("Test conversation"). Conversation-mode cards still sit full width instead of beside the section heading, and the segmented sub-tab row leaves empty space to the right of its three pills.
 
+## Destination sweep — all seven surfaces in the native window
+
+Every destination was opened in the bundled app with `--route` (forwarded to the running instance, so one process served all seven) against the read-only fixture gateway.
+
+| Destination | Route | What renders |
+|---|---|---|
+| Chat | `/` | greeting, composer, model chip, session rail |
+| Tasks & agents | `/agents` | "No live subagents — when a turn delegates work, child agents stream their progress here." |
+| Automations | `/cron` | "Scheduled jobs · 0 jobs", empty state, New cron button |
+| Connections | `/messaging` | All / Connected / Inactive filters, Telegram · Discord · Slack rows, Telegram detail: Connected, Messaging gateway stopped, QR quick setup, credential fields, Enabled, Save changes |
+| Skills & tools | `/capabilities` | Skills / Plugins / Connectors / Tools tabs, search, category chips (+224), "Discover Skills", featured built-in card, agentic-AI carousel |
+| Library | `/artifacts` | "All · 0", "No artifacts found", empty-state copy |
+| Settings | `/settings` | nine categories docked beside the rail, per-page detail |
+
+### A WebKit gap that took a whole destination down
+
+`/capabilities` first render in the native app was an error boundary: **"workspace" failed to render — Can't find variable: requestIdleCallback**. Chromium (Electron) implements `requestIdleCallback`; WebKit does not below Safari 16.4. `src/app/capabilities/catalog/catalog-data.ts` called it unguarded, so the import-time prefetch killed the view. Fixed twice over:
+
+- the call site now degrades to `setTimeout` when the API is absent (same rule `components/idle-mount.tsx` already documents);
+- the injected bridge provides a `requestIdleCallback`/`cancelIdleCallback` pair (timer-backed, Chromium's handle and deadline shape) so any other unguarded caller, including plugin code, cannot take a view down. `bridge-socket.test.mjs` covers it: 7/7, including cancel-before-fire.
+
+### Fixture contract corrections (harness, not product)
+
+The read-only fixture had been returning object wrappers where the API returns bare arrays, so `/cron` crashed with `g.filter is not a function` before any product code ran. Corrected against the renderer's own API modules: `/api/cron/jobs` → array, `/api/skills` → array, `/api/tools/toolsets` (it was `/api/toolsets`) → array, plus `/api/pairing`, `/api/skills/hub/official`, `/api/skills/hub/sources`, `/api/git/status`, `/api/git/worktrees`. Platform rows (Telegram connected, Discord stopped, Slack unconfigured) and three sample skills/toolsets give the review real layout instead of empty panes.
+
+### Open product findings from the sweep
+
+- **Tasks & agents shows only live subagents.** There is no surface for persistent agents, scheduled agent work or a task board, though the destination's name promises them.
+- **Vocabulary drifts inside Automations**: the rail says Automations, the panel says "Scheduled jobs" and the primary action says **"New cron"**.
+- **The backend pill flaps** between "Backend ready" and amber "Backend checking" across launches and navigations on the same connection; the readiness store is cleared on a state change that the socket never actually left.
+
 The guided voice setup is integrated but has not been exercised against a real microphone or provider. The All settings catalogue, complete native connector/auth/media/window parity, full run replay/gap/report handling, compact-window and keyboard acceptance and performance baselines remain incomplete. This is a native implementation checkpoint, not a full-product acceptance claim.

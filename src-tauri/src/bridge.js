@@ -20,6 +20,37 @@
 (() => {
   const boot = __HERMES_BOOTSTRAP__;
 
+  // Electron ran the renderer on Chromium; this shell runs it on WebKit, which
+  // has no requestIdleCallback below Safari 16.4. One unguarded caller (the
+  // Capabilities catalog warmer) otherwise blanks that whole view with
+  // "Can't find variable: requestIdleCallback". Provide Chromium's shape: a
+  // timer-based idle callback with the same handle/cancel contract.
+  if (typeof window.requestIdleCallback !== 'function') {
+    const handles = new Map();
+    let next = 1;
+    window.requestIdleCallback = callback => {
+      const id = next++;
+      const start = Date.now();
+      handles.set(id, setTimeout(() => {
+        if (!handles.delete(id)) {
+          return;
+        }
+        callback({ didTimeout: false, timeRemaining: () => Math.max(0, 50 - (Date.now() - start)) });
+      }, 1));
+      return id;
+    };
+    window.cancelIdleCallback = id => {
+      if (!handles.has(id)) {
+        return;
+      }
+      const timer = handles.get(id);
+      handles.delete(id);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    };
+  }
+
   const invoke = (cmd, args) => {
     const core = window.__TAURI__ && (window.__TAURI__.core || window.__TAURI__)
     if (!core || typeof core.invoke !== 'function') {

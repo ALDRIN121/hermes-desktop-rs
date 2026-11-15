@@ -291,7 +291,13 @@ fn mime_for(path: &Path) -> &'static str {
 
 /// `hermes-media://stream/<percent-encoded path>` → the file itself.
 /// Remote paths (`hermes-media://remote/...`) need the grant channel first.
-pub fn media_response(uri: &str) -> tauri::http::Response<Vec<u8>> {
+///
+/// Byte ranges matter here: WebKit's `<audio>`/`<video>` seek only when the
+/// server answers `Range` with a 206 and an `accept-ranges` header, and a
+/// player that cannot seek cannot play a voice clip past its first chunk. The
+/// range is read from disk directly, so a 200 MB video never lands in memory
+/// whole just to play ten seconds of it.
+pub fn media_response(uri: &str, range_header: Option<&str>) -> tauri::http::Response<Vec<u8>> {
     let not_found = || {
         tauri::http::Response::builder()
             .status(404)
@@ -314,14 +320,116 @@ pub fn media_response(uri: &str) -> tauri::http::Response<Vec<u8>> {
         .map(|p| p.into_owned())
         .unwrap_or_else(|_| raw.to_string());
     let file = Path::new(&path);
-    match std::fs::read(file) {
-        Ok(bytes) => tauri::http::Response::builder()
-            .status(200)
-            .header("content-type", mime_for(file))
-            .header("access-control-allow-origin", "*")
-            .body(bytes)
-            .unwrap(),
-        Err(_) => not_found(),
+    let Ok(meta) = std::fs::metadata(file) else {
+        return not_found();
+    };
+    if !meta.is_file() {
+        return not_found();
+    }
+    let total = meta.len();
+    let mime = mime_for(file);
+
+    let Some((start, end)) = parse_range(range_header, total) else {
+        // An unparseable or unsatisfiable range must be refused, not silently
+        // answered with the whole file: the player would mis-seat its cursor.
+        return tauri::http::Response::builder()
+            .status(416)
+            .header("content-range", format!("bytes */{total}"))
+            .header("content-type", "text/plain")
+            .body(b"range not satisfiable".to_vec())
+            .unwrap();
+    };
+
+    use std::io::{Read, Seek, SeekFrom};
+    let length = end - start + 1;
+    let mut buffer = vec![0u8; length as usize];
+    let read = std::fs::File::open(file).and_then(|mut handle| {
+        handle.seek(SeekFrom::Start(start))?;
+        handle.read_exact(&mut buffer)
+    });
+    if read.is_err() {
+        return not_found();
+    }
+
+    let builder = tauri::http::Response::builder()
+        .header("content-type", mime)
+        .header("access-control-allow-origin", "*")
+        .header("accept-ranges", "bytes");
+
+    if start == 0 && length == total {
+        builder.status(200).body(buffer).unwrap()
+    } else {
+        builder
+            .status(206)
+            .header("content-range", format!("bytes {start}-{end}/{total}"))
+            .header("content-length", length.to_string())
+            .body(buffer)
+            .unwrap()
+    }
+}
+
+/// `bytes=start-end`, `bytes=start-` and `bytes=-suffix`; `None` when the
+/// header is absent (serve everything) and `None` when it cannot be honoured.
+enum RangeParse {
+    Whole,
+    Partial(u64, u64),
+    Unsatisfiable,
+}
+
+fn parse_range_typed(header: Option<&str>, total: u64) -> RangeParse {
+    let Some(raw) = header else {
+        return RangeParse::Whole;
+    };
+    let raw = raw.trim();
+    let Some(spec) = raw.strip_prefix("bytes=") else {
+        // Some other unit: serve the whole representation, which is allowed.
+        return RangeParse::Whole;
+    };
+    // Multi-range answers would need multipart/byteranges; take the first.
+    let spec = spec.split(',').next().unwrap_or(spec).trim();
+    let Some((from, to)) = spec.split_once('-') else {
+        return RangeParse::Unsatisfiable;
+    };
+    if total == 0 {
+        return RangeParse::Unsatisfiable;
+    }
+
+    if from.is_empty() {
+        let Ok(suffix) = to.trim().parse::<u64>() else {
+            return RangeParse::Unsatisfiable;
+        };
+        if suffix == 0 {
+            return RangeParse::Unsatisfiable;
+        }
+        let start = total.saturating_sub(suffix);
+        return RangeParse::Partial(start, total - 1);
+    }
+
+    let Ok(start) = from.trim().parse::<u64>() else {
+        return RangeParse::Unsatisfiable;
+    };
+    if start >= total {
+        return RangeParse::Unsatisfiable;
+    }
+    let end = if to.trim().is_empty() {
+        total - 1
+    } else {
+        let Ok(end) = to.trim().parse::<u64>() else {
+            return RangeParse::Unsatisfiable;
+        };
+        if end < start {
+            return RangeParse::Unsatisfiable;
+        }
+        end.min(total - 1)
+    };
+    RangeParse::Partial(start, end)
+}
+
+fn parse_range(header: Option<&str>, total: u64) -> Option<(u64, u64)> {
+    match parse_range_typed(header, total) {
+        RangeParse::Whole => Some((0, total.saturating_sub(1))),
+        RangeParse::Partial(start, end) => Some((start, end)),
+        RangeParse::Unsatisfiable => None,
     }
 }
 
@@ -451,6 +559,26 @@ pub fn open_workspace(app: tauri::AppHandle) -> Result<(), String> {
 pub fn open_task(app: tauri::AppHandle) -> Result<(), String> {
     crate::open_task_window(&app, false)
 }
+
+/// Milliseconds from process start to the moment WebKit reports the main
+/// document finished, so a performance run measures the shell's own startup
+/// rather than guessing from outside. Only written for a measure launch.
+pub fn stamp_first_paint() {
+    if std::env::var("HERMES_MEASURE_STARTUP").is_err() {
+        return;
+    }
+    let elapsed = STARTED.get().map(|at| at.elapsed().as_millis()).unwrap_or(0);
+    let path = std::env::temp_dir().join("hermes-rust-first-paint.json");
+    let _ = std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+        "firstPaintMs": elapsed,
+        "pid": std::process::id()
+    })).unwrap_or_default());
+}
+
+/// Process start reference for `stamp_first_paint`. Set once at the top of
+/// `main` — a lazy lock would start its clock at the first *read*, which is the
+/// very moment being measured.
+pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 #[tauri::command]
 pub fn shell_diag(payload: Value) {
@@ -1135,4 +1263,104 @@ pub fn task_audit(payload: String) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_media(name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hermes-media-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn uri_for(path: &Path) -> String {
+        format!(
+            "hermes-media://stream/{}",
+            urlencoding::encode(&path.to_string_lossy())
+        )
+    }
+
+    #[test]
+    fn a_whole_file_is_served_without_a_range_and_offers_ranges() {
+        let path = write_media("whole.txt", b"0123456789");
+        let response = media_response(&uri_for(&path), None);
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(response.body().as_slice(), b"0123456789");
+    }
+
+    #[test]
+    fn a_bounded_range_answers_206_with_the_exact_bytes() {
+        let path = write_media("bounded.txt", b"0123456789");
+        let response = media_response(&uri_for(&path), Some("bytes=2-5"));
+
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.headers()["content-range"], "bytes 2-5/10");
+        assert_eq!(response.headers()["content-length"], "4");
+        assert_eq!(response.body().as_slice(), b"2345");
+    }
+
+    #[test]
+    fn an_open_ended_range_runs_to_the_end() {
+        let path = write_media("open.txt", b"0123456789");
+        let response = media_response(&uri_for(&path), Some("bytes=7-"));
+
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.body().as_slice(), b"789");
+    }
+
+    #[test]
+    fn a_suffix_range_serves_the_tail() {
+        let path = write_media("suffix.txt", b"0123456789");
+        let response = media_response(&uri_for(&path), Some("bytes=-3"));
+
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.headers()["content-range"], "bytes 7-9/10");
+        assert_eq!(response.body().as_slice(), b"789");
+    }
+
+    #[test]
+    fn a_range_past_the_end_is_416_not_the_whole_file() {
+        let path = write_media("past.txt", b"0123456789");
+        let response = media_response(&uri_for(&path), Some("bytes=99-"));
+
+        assert_eq!(response.status(), 416);
+        assert_eq!(response.headers()["content-range"], "bytes */10");
+        assert!(response.body().is_empty() || response.body().as_slice() == b"range not satisfiable");
+    }
+
+    #[test]
+    fn a_reversed_or_malformed_range_is_refused() {
+        let path = write_media("malformed.txt", b"0123456789");
+        let uri = uri_for(&path);
+
+        assert_eq!(media_response(&uri, Some("bytes=5-2")).status(), 416);
+        assert_eq!(media_response(&uri, Some("bytes=abc")).status(), 416);
+        assert_eq!(media_response(&uri, Some("bytes=-0")).status(), 416);
+        assert_eq!(media_response(&uri, Some("bytes=")).status(), 416);
+    }
+
+    #[test]
+    fn an_end_past_the_file_is_clamped_not_widened() {
+        let path = write_media("clamp.txt", b"0123456789");
+        let response = media_response(&uri_for(&path), Some("bytes=8-9999"));
+
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.headers()["content-range"], "bytes 8-9/10");
+        assert_eq!(response.body().as_slice(), b"89");
+    }
+
+    #[test]
+    fn a_missing_file_is_404_and_a_bad_host_is_501() {
+        assert_eq!(
+            media_response("hermes-media://stream/%2Fdefinitely%2Fnot%2Fhere", None).status(),
+            404
+        );
+        assert_eq!(media_response("hermes-media://remote/x", None).status(), 501);
+    }
 }

@@ -128,6 +128,15 @@ pub fn show_main_window(app: &tauri::AppHandle) {
         .inner_size(1360.0, 900.0)
         .min_inner_size(720.0, 480.0)
         .initialization_script(script)
+        .on_page_load(|window, payload| {
+            // The one honest first-paint signal the shell has: WebKit reports
+            // Finished once the document and its initial script have run. A
+            // performance run reads this stamp; ordinary launches ignore it.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                crate::commands::stamp_first_paint();
+            }
+            let _ = window;
+        })
         .build();
     if let Ok(window) = built {
         apply_route(&window);
@@ -249,6 +258,7 @@ fn open_task_window_with_args(
 }
 
 fn main() {
+    let _ = commands::STARTED.set(std::time::Instant::now());
     let home = hermes_home();
     let initial_args: Vec<String> = std::env::args().collect();
     let parsed = launch::parse(&initial_args);
@@ -309,7 +319,11 @@ fn main() {
             commands::shell_info
         ])
         .register_uri_scheme_protocol("hermes-media", |_app, request| {
-            commands::media_response(&request.uri().to_string())
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok());
+            commands::media_response(&request.uri().to_string(), range)
         })
         .setup(move |app| {
             let script = bootstrap_script(&home);

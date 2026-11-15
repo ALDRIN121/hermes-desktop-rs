@@ -1,0 +1,28 @@
+{
+  "measured": "bundled fixture app, debug profile, isolated HERMES_HOME",
+  "runs": [
+    {
+      "run": "1",
+      "firstPaintMs": 2124,
+      "settledMs": 7340,
+      "rssMb": 91.1
+    },
+    {
+      "run": "2",
+      "firstPaintMs": 979,
+      "settledMs": 5196,
+      "rssMb": 99.8
+    },
+    {
+      "run": "3",
+      "firstPaintMs": 1441,
+      "settledMs": 5731,
+      "rssMb": 116.5
+    }
+  ],
+  "summary": {
+    "firstPaintMsMedian": 1441,
+    "rssMbMax": 116.5,
+    "rssMbMedian": 99.8
+  }
+}

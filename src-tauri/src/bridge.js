@@ -409,6 +409,12 @@
       if (this.readyState === 0) throw new Error('WebSocket is still connecting')
       if (this.readyState !== 1 || this._id === null) return
       const id = this._id
+      // WebSocket.send takes ownership of the bytes now; callers may reuse
+      // their PCM buffer before the asynchronous IPC queue drains.
+      if (ArrayBuffer.isView(data)) {
+        data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice().buffer
+      } else if (data instanceof ArrayBuffer) data = data.slice(0)
+      else if (!(data instanceof Blob)) data = String(data)
       // Blob conversion is asynchronous: queue every frame to retain send order.
       this._outgoing = this._outgoing.then(async () => {
         if (this._closed) return
@@ -426,9 +432,19 @@
     }
 
     close() {
-      if (this._closed) return
-      if (this._id !== null) invoke('hermes_ws_close', { id: this._id }).catch(() => undefined)
-      this._finishClose(1000, '')
+      if (this._closed || this.readyState === 2) return
+      if (this._id === null) {
+        this._finishClose(1000, '')
+        return
+      }
+      this.readyState = 2
+      // A local close follows all accepted sends, including Blob conversion.
+      // A peer close still retires immediately through _finishClose.
+      this._outgoing = this._outgoing.then(async () => {
+        if (this._closed) return
+        await invoke('hermes_ws_close', { id: this._id }).catch(() => undefined)
+        this._finishClose(1000, '')
+      })
     }
   }
 

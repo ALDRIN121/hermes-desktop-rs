@@ -4,6 +4,11 @@ Implementation authorized 15 November 2026. Working branch: `codex/full-hermes`.
 
 ## Current work
 
+- GPUI clarification received: no GPUI implementation exists here or on the identified origin. Continue with the current Rust/Tauri and pinned React architecture; no further GPUI path search or speculative migration is required.
+- All settings owner regression: writes now use the captured read scope, cache invalidation keeps the original connection, and changing owner remounts field drafts. Two reproducing tests failed before the fix; three owner regressions are included in the settings checks.
+- Follow-up verification: Settings suite 82 files / 628 tests passed, including delayed scope-A completion after switching to scope B; TypeScript passed with the 8 GiB heap; targeted lint passed. These results cover the current Tauri renderer, not an absent GPUI implementation.
+- Corrected performance interpretation: the recorded 1,441 ms median is document-load completion; the post-load sample includes a fixed wait. Actual rendered-frame and interactive-readiness timing remain unmeasured.
+
 - Imported 5,066 tracked renderer/shared/workspace, build-policy and contract-fixture files from immutable upstream commit `3b421578588243f920886e6fe79a6faa87ea026e`, with per-file/archive SHA-256 provenance. No installed user state or uncommitted upstream changes copied.
 - Reconciled the pinned pristine source against the shipped renderer: upstream's own desktop freshness algorithm produces exactly `a8b4866557bfd351e263ecab4ca9f915e072b5fc20dc5e2715198a1da8ad702a`, matching `ui/hermes-build.json`. The local redesign intentionally changes that hash; new builds record it and refuse source changes during a build.
 - Added tested import and repeatable renderer build scripts. Source renderer production build succeeded; generated output is ignored in `renderer/dist`.
@@ -21,6 +26,9 @@ Implementation authorized 15 November 2026. Working branch: `codex/full-hermes`.
 - Pinned-source provenance is enforced rather than asserted: `import_renderer.py --check` now accepts only recorded local edits, fails on an unrecorded change, fails on a deleted recorded file, and fails on any file that sits beside the snapshot without being recorded. `--record-local-changes` freezes the 13 modified and 12 added renderer files explicitly. New `--route <path>` opens one in-app screen in the real window for review; it is validated so only a hash route can be set.
 
 ## Verification so far
+
+- 15 November follow-up: user requested preserving recent GPUI performance work. The current checkout/workspace still declares `hermes-contract` and `src-tauri`, with no GPUI dependency or source found. Requested the GPUI branch/path before further renderer-specific changes; no migration or reversal inferred.
+- Fixed two independently reproduced socket regressions: close now drains accepted text/Blob frames, and send snapshots binary buffers before callers reuse them. Bridge tests RED 8/10 then GREEN 10/10. Fresh checks on the current checkout: Rust 21 contract + 46 shell passed; six focused voice/settings/run-evidence/board files passed 23 tests; importer tests passed 7/7. These checks do not establish GPUI parity or real provider/hardware acceptance.
 
 - Baseline Rust workspace: 11 contract + 21 shell tests passed with local-socket permission. Sandbox-only run cannot bind the Unix socket fixture.
 - Import/provenance tests: 7 passed, including recorded-change acceptance, unrecorded-change refusal, stray-file refusal and deletion refusal. Live snapshot: 5,054 pinned files verified, 13 recorded modifications, 12 recorded additions.

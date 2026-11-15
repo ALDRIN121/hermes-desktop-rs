@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { useI18n } from '@/i18n'
 import { FileText, FolderOpen } from '@/lib/icons'
 import { queryClient } from '@/lib/query-client'
+import { $activeConnectionId } from '@/store/connections'
 import { notify, notifyError } from '@/store/notifications'
 import { $settingsRequestProfile } from '@/store/settings-scope'
 import type { HermesConfigRecord } from '@/types/hermes'
@@ -86,16 +87,12 @@ export function filterLeaves(leaves: readonly ConfigLeaf[], query: string): Conf
     return [...leaves]
   }
 
-  return leaves.filter(leaf => leaf.path.toLowerCase().includes(needle) || displayValue(leaf).toLowerCase().includes(needle))
+  return leaves.filter(
+    leaf => leaf.path.toLowerCase().includes(needle) || displayValue(leaf).toLowerCase().includes(needle)
+  )
 }
 
-function LeafEditor({
-  leaf,
-  onCommit
-}: {
-  leaf: ConfigLeaf
-  onCommit: (value: unknown) => void
-}) {
+function LeafEditor({ leaf, onCommit }: { leaf: ConfigLeaf; onCommit: (value: unknown) => void }) {
   const { t } = useI18n()
   const copy = t.settings.allSettings
   const [text, setText] = useState(() => displayValue(leaf))
@@ -168,8 +165,14 @@ export function AllSettings() {
   const { t } = useI18n()
   const copy = t.settings.allSettings
   const profile = useStore($settingsRequestProfile)
+  const connectionId = useStore($activeConnectionId)
   const [query, setQuery] = useState('')
   const record = useHermesConfigRecord(profile ?? undefined)
+  // Capture the read's owner and cache slot now. A later scope switch must
+  // not retarget a save or its completion invalidation to another gateway.
+  const writeScope = record.writeScope
+  const cacheKey = hermesConfigKey(profile ?? undefined, connectionId)
+  const editorScope = JSON.stringify([connectionId, profile])
 
   const config = useMemo(() => (record.data ?? {}) as HermesConfigRecord, [record.data])
   const leaves = useMemo(() => flattenConfig(config), [config])
@@ -197,9 +200,14 @@ export function AllSettings() {
     }
 
     try {
-      await saveHermesConfigRecord(patch, profile ?? undefined)
+      const result = await saveHermesConfigRecord(patch, writeScope ?? profile ?? undefined)
+
+      if (!result.ok) {
+        throw new Error(copy.saveFailed)
+      }
+
       notify({ kind: 'info', message: copy.saved })
-      await queryClient.invalidateQueries({ queryKey: hermesConfigKey(profile ?? undefined) })
+      await queryClient.invalidateQueries({ queryKey: cacheKey })
     } catch (error) {
       notifyError(error, copy.saveFailed)
     }
@@ -233,7 +241,7 @@ export function AllSettings() {
               <ListRow
                 action={<LeafEditor leaf={leaf} onCommit={value => void save(leaf, value)} />}
                 hint={leaf.kind}
-                key={leaf.path}
+                key={JSON.stringify([editorScope, leaf.path])}
                 title={<span className="font-mono text-[0.78rem]">{leaf.path}</span>}
               />
             ))}

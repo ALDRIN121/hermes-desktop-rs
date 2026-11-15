@@ -5077,6 +5077,7 @@
     "apps/desktop/src/app/right-sidebar/run-evidence.ts",
     "apps/desktop/src/app/right-sidebar/run-inspector.test.tsx",
     "apps/desktop/src/app/right-sidebar/run-inspector.tsx",
+    "apps/desktop/src/app/settings/all-settings.scope.test.tsx",
     "apps/desktop/src/app/settings/all-settings.test.ts",
     "apps/desktop/src/app/settings/all-settings.tsx",
     "apps/desktop/src/app/settings/navigation-groups.test.ts",

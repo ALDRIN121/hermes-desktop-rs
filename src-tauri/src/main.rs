@@ -129,9 +129,8 @@ pub fn show_main_window(app: &tauri::AppHandle) {
         .min_inner_size(720.0, 480.0)
         .initialization_script(script)
         .on_page_load(|window, payload| {
-            // The one honest first-paint signal the shell has: WebKit reports
-            // Finished once the document and its initial script have run. A
-            // performance run reads this stamp; ordinary launches ignore it.
+            // Historical firstPaintMs records document-load completion, not a
+            // compositor paint or React readiness. See PERFORMANCE.md.
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 crate::commands::stamp_first_paint();
             }

@@ -6,6 +6,29 @@ import assert from 'node:assert/strict'
 const source = readFileSync(new URL('../../src-tauri/src/bridge.js', import.meta.url), 'utf8')
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
+test('closing drains accepted text and binary frames before the close command', async () => {
+  const h = harness(), socket = new h.window.WebSocket('ws://localhost:1234')
+  await settle(); h.pending[0](1); await settle()
+  socket.send('final-frame')
+  socket.send(new Blob([new Uint8Array([0, 255])]))
+  socket.close(); socket.close()
+  await settle(); await settle()
+  const frames = h.calls.filter(call => ['hermes_ws_send', 'hermes_ws_close'].includes(call.command))
+  assert.deepEqual(frames.map(call => call.command), ['hermes_ws_send', 'hermes_ws_send', 'hermes_ws_close'])
+  assert.equal(frames[0].args.data, 'final-frame')
+  assert.deepEqual(Array.from(frames[1].args.data), [0, 255])
+  assert.equal(socket.readyState, 3)
+})
+
+test('send snapshots binary bytes before the caller reuses its buffer', async () => {
+  const h = harness(), socket = new h.window.WebSocket('ws://localhost:1234')
+  await settle(); h.pending[0](1); await settle()
+  const bytes = new Uint8Array([1, 2, 3])
+  socket.send(bytes); bytes.fill(9)
+  await settle()
+  assert.deepEqual(Array.from(h.calls.find(call => call.command === 'hermes_ws_send').args.data), [1, 2, 3])
+})
+
 function harness() {
   const listeners = new Map(), calls = [], pending = [], timers = []
   class CloseEvent extends Event { constructor(type, init) { super(type); Object.assign(this, init) } }

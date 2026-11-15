@@ -58,7 +58,7 @@ Every destination was opened in the bundled app with `--route` (forwarded to the
 | Connections | `/messaging` | All / Connected / Inactive filters, Telegram · Discord · Slack rows, Telegram detail: Connected, Messaging gateway stopped, QR quick setup, credential fields, Enabled, Save changes |
 | Skills & tools | `/capabilities` | Skills / Plugins / Connectors / Tools tabs, search, category chips (+224), "Discover Skills", featured built-in card, agentic-AI carousel |
 | Library | `/artifacts` | "All · 0", "No artifacts found", empty-state copy |
-| Settings | `/settings` | nine categories docked beside the rail, per-page detail |
+| Settings | `/settings` | nine categories docked beside the rail, per-page detail, plus **All settings** under Advanced & diagnostics |
 
 ### A WebKit gap that took a whole destination down
 
@@ -87,4 +87,12 @@ The read-only fixture had been returning object wrappers where the API returns b
 
 The frontend is **embedded in the binary** by `tauri::generate_context!`; the app bundle carries no `Resources/assets`. Rebuilding the renderer alone therefore leaves the running app on the previous UI, and clearing the WebView cache does not help. Always `node scripts/build_renderer.mjs && cargo build -p hermes-desktop-rust` before re-bundling, then verify the new copy actually appears.
 
-The guided voice setup is integrated but has not been exercised against a real microphone or provider. The All settings catalogue, complete native connector/auth/media/window parity, full run replay/gap/report handling, compact-window and keyboard acceptance and performance baselines remain incomplete. This is a native implementation checkpoint, not a full-product acceptance claim.
+### All settings catalogue
+
+`Settings → Advanced & diagnostics → All settings` (`src/app/settings/all-settings.tsx`) lists **every leaf of the active profile's config record**, not just the keys a curated page happens to show: dotted paths in yaml order, grouped by top-level section, each row labelled with its path and type. The search box matches key paths *and* rendered values (`MAX_TOKEN`, `terminal`), and a live counter reads "N of M settings".
+
+Editing is in place and typed: booleans are the same `Switch` row the curated pages use, numbers parse and reject empty/NaN, strings commit on blur or Enter, and arrays/objects edit as JSON that refuses to save when it will not parse. A save writes `diffConfig` of exactly the changed path through `saveHermesConfigRecord`, so the backend's deep merge only ever sees the one key, then invalidates the shared config cache — other settings pages repaint. The page honours the shared "Applies to" scope, so it edits whichever profile the rest of Settings is pointed at.
+
+3 unit tests cover flattening (including empty sections, arrays and nulls), section grouping, and search over keys and values. Verified in the bundled app: nav entry present, "Editing profile: default", "18 of 18 settings", grouped rows with number, boolean and string editors.
+
+The guided voice setup is integrated but has not been exercised against a real microphone or provider. Connector sign-in flows, media capture, window parity, full-tree test runs and performance baselines remain incomplete. This is a native implementation checkpoint, not a full-product acceptance claim.

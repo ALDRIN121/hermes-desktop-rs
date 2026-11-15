@@ -14,6 +14,7 @@ import {
   Bell,
   Cpu,
   Download,
+  FileText,
   Globe,
   Info,
   Keyboard,
@@ -45,6 +46,7 @@ import { OverlayMain, OverlayNav, type OverlayNavGroup, OverlaySplitLayout } fro
 import { OverlayView } from '../overlays/overlay-view'
 
 import { AboutSettings } from './about-settings'
+import { AllSettings } from './all-settings'
 import { AppearanceSettings } from './appearance-settings'
 import { BILLING_VIEWS, BillingSettings, type BillingSubView } from './billing'
 import { deriveBillingView, useBillingState, useSubscriptionState } from './billing/use-billing-state'
@@ -87,11 +89,13 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'billing',
   'sessions',
   'plugins',
-  'about'
+  'about',
+  'all-settings'
 ]
 
 // Pages that take nothing but the resolved sub-page.
 const SUBPAGE_VIEWS: Partial<Record<SettingsViewId, ComponentType<{ subpage?: string }>>> = {
+  'all-settings': AllSettings,
   'config:appearance': AppearanceSettings,
   about: AboutSettings,
   // 'connections' renders the unified page too so the frame before the alias
@@ -431,6 +435,14 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
             id: 'plugins',
             label: t.settings.nav.plugins,
             onSelect: () => plugins.open(null)
+          },
+          {
+            active: activeView === 'all-settings',
+            gapBefore: true,
+            icon: FileText,
+            id: 'all-settings',
+            label: t.settings.allSettings.nav,
+            onSelect: () => setActiveView('all-settings')
           },
           {
             active: activeView === 'about',

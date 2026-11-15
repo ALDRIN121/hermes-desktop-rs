@@ -601,6 +601,18 @@ export interface Translations extends NoticeTranslations {
 
   settings: {
     subpages: Record<string, string>
+    allSettings: {
+      title: string
+      intro: string
+      search: string
+      count: (shown: number, total: number) => string
+      empty: string
+      appliesTo: (profile: string) => string
+      invalidJson: string
+      saveFailed: string
+      saved: string
+      nav: string
+    }
     closeSettings: string
     exportConfig: string
     importConfig: string

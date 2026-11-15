@@ -687,6 +687,19 @@ export const en: Translations = {
   },
 
   settings: {
+    allSettings: {
+      title: 'All settings',
+      intro:
+        "Every key in this profile's config.yaml, searchable and editable in place. The curated pages above cover the common paths; anything they do not show is here.",
+      search: 'Search keys and values…',
+      count: (shown, total) => `${shown} of ${total} settings`,
+      empty: 'No key matches that search.',
+      appliesTo: profile => `Editing profile: ${profile}`,
+      invalidJson: 'Not valid JSON — nothing was saved.',
+      saveFailed: 'Could not save that setting',
+      saved: 'Setting saved',
+      nav: 'All settings'
+    },
     subpages: {
       appearanceTheme: 'Theme',
       appearanceTypography: 'Typography',

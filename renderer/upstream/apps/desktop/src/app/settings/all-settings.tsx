@@ -1,0 +1,245 @@
+import { useStore } from '@nanostores/react'
+import { useMemo, useState } from 'react'
+
+import { saveHermesConfigRecord } from '@/api/config'
+import { hermesConfigKey, useHermesConfigRecord } from '@/app/hooks/use-config-record'
+import { Input } from '@/components/ui/input'
+import { useI18n } from '@/i18n'
+import { FileText, FolderOpen } from '@/lib/icons'
+import { queryClient } from '@/lib/query-client'
+import { notify, notifyError } from '@/store/notifications'
+import { $settingsRequestProfile } from '@/store/settings-scope'
+import type { HermesConfigRecord } from '@/types/hermes'
+
+import { diffConfig, setNested } from './helpers'
+import { ListRow, SectionHeading, SettingsContent, ToggleRow } from './primitives'
+
+export type ConfigLeafKind = 'array' | 'boolean' | 'null' | 'number' | 'object' | 'string'
+
+export interface ConfigLeaf {
+  /** Dotted path, exactly as config.yaml spells it. */
+  path: string
+  /** Top-level section, used for the group headings. */
+  section: string
+  value: unknown
+  kind: ConfigLeafKind
+}
+
+const kindOf = (value: unknown): ConfigLeafKind => {
+  if (value === null) {
+    return 'null'
+  }
+
+  if (Array.isArray(value)) {
+    return 'array'
+  }
+
+  const type = typeof value
+
+  if (type === 'boolean' || type === 'number' || type === 'string') {
+    return type
+  }
+
+  return 'object'
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/**
+ * Every leaf of the config record, in yaml order. A container with no children
+ * is still a leaf — an empty section is something a user can fill in, not
+ * something to hide.
+ */
+export function flattenConfig(record: HermesConfigRecord, prefix = '', out: ConfigLeaf[] = []): ConfigLeaf[] {
+  for (const [key, value] of Object.entries(record ?? {})) {
+    const path = prefix ? `${prefix}.${key}` : key
+    const section = prefix ? prefix.split('.')[0]! : key
+
+    if (isPlainObject(value) && Object.keys(value).length > 0) {
+      flattenConfig(value, path, out)
+    } else {
+      out.push({ kind: kindOf(value), path, section, value })
+    }
+  }
+
+  return out
+}
+
+function displayValue(leaf: ConfigLeaf): string {
+  if (leaf.kind === 'array' || leaf.kind === 'object') {
+    return JSON.stringify(leaf.value)
+  }
+
+  if (leaf.kind === 'null') {
+    return 'null'
+  }
+
+  return String(leaf.value)
+}
+
+/** Case-insensitive match on the key path or the rendered value. */
+export function filterLeaves(leaves: readonly ConfigLeaf[], query: string): ConfigLeaf[] {
+  const needle = query.trim().toLowerCase()
+
+  if (!needle) {
+    return [...leaves]
+  }
+
+  return leaves.filter(leaf => leaf.path.toLowerCase().includes(needle) || displayValue(leaf).toLowerCase().includes(needle))
+}
+
+function LeafEditor({
+  leaf,
+  onCommit
+}: {
+  leaf: ConfigLeaf
+  onCommit: (value: unknown) => void
+}) {
+  const { t } = useI18n()
+  const copy = t.settings.allSettings
+  const [text, setText] = useState(() => displayValue(leaf))
+  const [error, setError] = useState<null | string>(null)
+
+  if (leaf.kind === 'boolean') {
+    return <ToggleRow checked={leaf.value === true} label="" onChange={next => onCommit(next)} />
+  }
+
+  const commit = () => {
+    if (text === displayValue(leaf)) {
+      setError(null)
+
+      return
+    }
+
+    if (leaf.kind === 'array' || leaf.kind === 'object') {
+      try {
+        onCommit(JSON.parse(text))
+      } catch {
+        setError(copy.invalidJson)
+      }
+
+      return
+    }
+
+    if (leaf.kind === 'number') {
+      const parsed = Number(text)
+
+      if (text.trim() === '' || Number.isNaN(parsed)) {
+        setError(copy.invalidJson)
+
+        return
+      }
+
+      onCommit(parsed)
+
+      return
+    }
+
+    onCommit(text)
+  }
+
+  return (
+    <div className="min-w-0">
+      <Input
+        aria-invalid={error ? true : undefined}
+        aria-label={leaf.path}
+        className="font-mono text-[0.75rem]"
+        onBlur={commit}
+        onChange={event => {
+          setText(event.target.value)
+          setError(null)
+        }}
+        onKeyDown={event => {
+          if (event.key === 'Enter') {
+            event.currentTarget.blur()
+          }
+        }}
+        spellCheck={false}
+        value={text}
+      />
+      {error && <p className="mt-1 text-[0.7rem] text-destructive">{error}</p>}
+    </div>
+  )
+}
+
+/** Every config key in the profile, searchable, editable in place. */
+export function AllSettings() {
+  const { t } = useI18n()
+  const copy = t.settings.allSettings
+  const profile = useStore($settingsRequestProfile)
+  const [query, setQuery] = useState('')
+  const record = useHermesConfigRecord(profile ?? undefined)
+
+  const config = useMemo(() => (record.data ?? {}) as HermesConfigRecord, [record.data])
+  const leaves = useMemo(() => flattenConfig(config), [config])
+  const shown = useMemo(() => filterLeaves(leaves, query), [leaves, query])
+
+  const groups = useMemo(() => {
+    const bySection = new Map<string, ConfigLeaf[]>()
+
+    for (const leaf of shown) {
+      const list = bySection.get(leaf.section) ?? []
+
+      list.push(leaf)
+      bySection.set(leaf.section, list)
+    }
+
+    return [...bySection.entries()]
+  }, [shown])
+
+  const save = async (leaf: ConfigLeaf, value: unknown) => {
+    const next = setNested(config, leaf.path, value)
+    const patch = diffConfig(config, next)
+
+    if (Object.keys(patch).length === 0) {
+      return
+    }
+
+    try {
+      await saveHermesConfigRecord(patch, profile ?? undefined)
+      notify({ kind: 'info', message: copy.saved })
+      await queryClient.invalidateQueries({ queryKey: hermesConfigKey(profile ?? undefined) })
+    } catch (error) {
+      notifyError(error, copy.saveFailed)
+    }
+  }
+
+  return (
+    <SettingsContent>
+      <SectionHeading icon={FileText} title={copy.title} />
+      <p className="mb-1 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">{copy.intro}</p>
+      <p className="mb-3 text-[0.7rem] text-muted-foreground/60">{copy.appliesTo(profile ?? 'default')}</p>
+
+      <div className="sticky top-0 z-10 flex items-center gap-3 bg-(--ui-chat-surface-background) py-2">
+        <Input
+          aria-label={copy.search}
+          onChange={event => setQuery(event.target.value)}
+          placeholder={copy.search}
+          value={query}
+        />
+        <span className="shrink-0 text-[0.7rem] tabular-nums text-muted-foreground">
+          {copy.count(shown.length, leaves.length)}
+        </span>
+      </div>
+
+      {shown.length === 0 ? (
+        <p className="py-6 text-center text-[0.8125rem] text-muted-foreground">{copy.empty}</p>
+      ) : (
+        groups.map(([section, list]) => (
+          <section className="pb-4" key={section}>
+            <SectionHeading icon={FolderOpen} title={section} />
+            {list.map(leaf => (
+              <ListRow
+                action={<LeafEditor leaf={leaf} onCommit={value => void save(leaf, value)} />}
+                hint={leaf.kind}
+                key={leaf.path}
+                title={<span className="font-mono text-[0.78rem]">{leaf.path}</span>}
+              />
+            ))}
+          </section>
+        ))
+      )}
+    </SettingsContent>
+  )
+}

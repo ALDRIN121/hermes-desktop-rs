@@ -14,9 +14,14 @@ mod fs_ops;
 mod gateway_ws;
 mod git_ops;
 mod launch;
+mod oauth_callback;
+mod plugin_dial;
+mod prepared_journal;
+mod preview_watch;
 mod system_ops;
 mod task_ops;
 mod terminal;
+mod windows;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +49,8 @@ fn bootstrap_script(home: &PathBuf) -> String {
         "translucencySupported": false,
         "localModelsEnabled": false,
         "assumeFreshInstall": false,
-        "selfTest": std::env::var("HERMES_SHELL_SELFTEST").map(|v| v == "1").unwrap_or(false),
+        "selfTest": cfg!(debug_assertions) && std::env::var("HERMES_SHELL_TEST_INSTANCE").is_ok() && std::env::var("HERMES_SHELL_SELFTEST").map(|v| v == "1").unwrap_or(false),
+        "mediaSelfTest": cfg!(debug_assertions) && std::env::var("HERMES_SHELL_TEST_INSTANCE").is_ok() && std::env::var("HERMES_SHELL_MEDIA_SELFTEST").map(|v| v == "1").unwrap_or(false),
         "localSkin": skin,
         "uiPreferences": prefs,
         "home": home,
@@ -302,6 +308,11 @@ fn main() {
             }
         }))
         .manage(commands::ShellState::new(home.clone()))
+        .manage(windows::WindowRoutes::default())
+        .manage(Arc::new(prepared_journal::PreparedJournal::default()))
+        .manage(plugin_dial::PreparedDials::default())
+        .manage(preview_watch::PreviewWatches::default())
+        .manage(Arc::new(oauth_callback::CallbackRegistry::default()))
         .manage(Arc::new(gateway_ws::SocketRegistry::default()))
         .invoke_handler(tauri::generate_handler![
             commands::hermes_ipc,
@@ -360,6 +371,24 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                use tauri::Manager;
+                window
+                    .state::<windows::WindowRoutes>()
+                    .forget(window.label());
+                window
+                    .state::<plugin_dial::PreparedDials>()
+                    .close_window(window.label());
+                window
+                    .state::<preview_watch::PreviewWatches>()
+                    .close_window(window.label());
+                window
+                    .state::<Arc<oauth_callback::CallbackRegistry>>()
+                    .close_window(window.label());
+                window
+                    .state::<Arc<gateway_ws::SocketRegistry>>()
+                    .close_window(window.label());
+            }
             // Closing the chat window parks the app in the menu bar; Quit lives
             // in the tray menu (and Cmd+Q).
             if window.label() == "main" || window.label() == "task" {

@@ -145,7 +145,13 @@ window" remain absent from the UI.
 - Native renders confirmed in the bundled fixture app: all seven destinations,
   Voice & audio, All settings.
 
-## What is genuinely still open
+## Later continuation
+
+The window-wiring and several native gaps below were subsequently addressed.
+See [native integration acceptance](NATIVE_INTEGRATION_PASS.md) for current
+implementation and evidence. This report preserves the earlier checkpoint.
+
+## What was still open at this checkpoint
 
 Phases 6–11 are **not complete**. Open items, stated plainly:
 

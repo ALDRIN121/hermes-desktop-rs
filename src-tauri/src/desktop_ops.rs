@@ -19,7 +19,7 @@ use crate::fs_ops;
 /// URL.
 const WEB_SCHEMES: &[&str] = &["http", "https", "mailto", "tel"];
 
-pub fn open_external(raw_url: &str) -> Result<Value, String> {
+fn validate_external_url(raw_url: &str) -> Result<&str, String> {
     let url = raw_url.trim();
     if url.is_empty() {
         return Err("openExternal: empty url".into());
@@ -36,6 +36,11 @@ pub fn open_external(raw_url: &str) -> Result<Value, String> {
         return Err("openExternal: url contains whitespace or control characters".into());
     }
 
+    Ok(url)
+}
+
+pub fn open_external(raw_url: &str) -> Result<Value, String> {
+    let url = validate_external_url(raw_url)?;
     #[cfg(target_os = "macos")]
     let opened = std::process::Command::new("open")
         .arg(url)
@@ -184,14 +189,20 @@ pub fn save_gateway_file(home: &Path, payload: &Value) -> Result<Value, String> 
     };
 
     let owner = crate::commands::resolve_owner(home, payload)?;
-    let ticket = owner.mint("media")?;
-    let url = format!(
-        "{}/api/files/download?path={}",
+    let ticket = owner.mint("native-http")?;
+    let mut url = format!(
+        "{}/api/files/download?path={}&profile={}",
         owner.connection.base_url.trim_end_matches('/'),
-        urlencoding::encode(path)
+        urlencoding::encode(path),
+        urlencoding::encode(owner.connection.profile.as_deref().unwrap_or("default"))
     );
+    if let Some(session) = payload.get("sessionId").and_then(Value::as_str) {
+        url.push_str(&format!("&session_id={}", urlencoding::encode(session)));
+    }
     let agent = ureq::AgentBuilder::new().redirects(0).build();
-    let mut request = agent.request("GET", &url).set("X-Hermes-Gateway-Ticket", &ticket);
+    let mut request = agent
+        .request("GET", &url)
+        .set("X-Hermes-Gateway-Ticket", &ticket);
     if !owner.connection.token.is_empty() {
         request = request.set(
             "Authorization",
@@ -215,8 +226,7 @@ pub fn save_gateway_file(home: &Path, payload: &Value) -> Result<Value, String> 
             .and_then(|ext| ext.to_str())
             .unwrap_or("download")
     ));
-    let mut file =
-        std::fs::File::create(&partial).map_err(|e| format!("saveGatewayFile: {e}"))?;
+    let mut file = std::fs::File::create(&partial).map_err(|e| format!("saveGatewayFile: {e}"))?;
     if let Err(error) = std::io::copy(&mut reader, &mut file) {
         drop(file);
         let _ = std::fs::remove_file(&partial);
@@ -270,7 +280,12 @@ pub fn save_image_from_url(url: &str) -> Result<Value, String> {
         "ext": format!(".{ext}"),
         "name": name
     }))?;
-    Ok(Value::Bool(saved.get("saved").and_then(|v| v.as_bool()).unwrap_or(false)))
+    Ok(Value::Bool(
+        saved
+            .get("saved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    ))
 }
 
 /// One HTML-free summary of a preview target: what kind of thing the right rail
@@ -338,40 +353,37 @@ pub fn normalize_preview_target(target: &str, base_dir: Option<&str>) -> Value {
 
 /// Poll-based file watch: the renderer gets a stable id and a change event, so a
 /// hot-reloaded preview repaints without the shell owning a native watcher.
-pub fn watch_preview_file(url: &str) -> Value {
-    let path = url.trim().trim_start_matches("file://");
-    let modified = std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|age| age.as_millis() as u64)
-        .unwrap_or(0);
-
-    json!({
-        "id": format!("{}-{modified}", path.len()),
-        "path": path
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn only_web_schemes_reach_the_os() {
-        assert!(open_external("javascript:alert(1)").is_err());
-        assert!(open_external("file:///etc/passwd").is_err());
-        assert!(open_external("").is_err());
-        assert!(open_external("not a url").is_err());
-        assert!(open_external("https://example.com/\nrm -rf /").is_err());
-        // An allowed scheme with bad args fails at the OS, not at the guard.
-        assert!(open_external("https://example.com/").is_ok());
+    fn external_url_validation_has_no_os_or_browser_side_effects() {
+        for url in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "",
+            "not a url",
+            "https://example.com/\nrm -rf /",
+        ] {
+            assert!(validate_external_url(url).is_err());
+        }
+        assert_eq!(
+            validate_external_url("https://example.com/").unwrap(),
+            "https://example.com/"
+        );
+        assert_eq!(
+            validate_external_url(" https://example.com/ ").unwrap(),
+            "https://example.com/"
+        );
     }
 
     #[test]
     fn machine_profile_answers_every_field_the_renderer_reads() {
         let profile = machine_profile();
-        for key in ["ageDays", "arch", "locale", "platform", "release", "username"] {
+        for key in [
+            "ageDays", "arch", "locale", "platform", "release", "username",
+        ] {
             assert!(profile.get(key).is_some(), "missing {key}");
         }
         assert!(!profile["locale"].as_str().unwrap().contains('_'));

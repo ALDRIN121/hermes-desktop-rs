@@ -36,7 +36,7 @@
 - [ ] Map each built-in route, native channel, settings row/key, dynamic family and plugin contribution to the target destination, owner, API/event, acceptance ID and implementation status.
 - [ ] Establish a reproducible source import/build using the existing upstream workspace and frozen lockfile, without editing the user's installed ~/.hermes tree. Preserve required shared packages, schemas, assets and plugin registries.
 - [ ] Prove rebuilt renderer routes/features load on a fixture host before substituting it for shipped assets. Preserve attribution/provenance and confirm update workflow.
-- [ ] Resolve architecture choice with user review if Rust/WASM/native GUI is preferred; do not silently execute the React plan after a different choice.
+- [x] Resolve architecture choice with user review if Rust/WASM/native GUI is preferred; do not silently execute the React plan after a different choice.
 
 **Deliverable:** versioned baseline and buildable renderer source; not a feature parity claim.
 
@@ -45,8 +45,8 @@
 **Files:** src-tauri/src/{main,commands,bridge.js,gateway_ws,fs_ops,git_ops,terminal,system_ops}; crates/hermes-contract; source renderer host adapter/types. Keep successful existing contracts unless versioned explicitly.
 
 - [ ] Add failing contract cases for scope/connection/profile routing, camel-case aliases, forwarded launch, show/minimize/draft retention, safe file reads/ranges, Git review semantics and folder dialogs; use v1 audit cases.
-- [ ] Implement explicit owner routing; unsupported versions fail visibly, never fall through to local/default.
-- [ ] Transport WebSocket text AND binary without String(data)/lossy UTF-8; cover ArrayBuffer/typed-array boundaries, early frames, close-during-connect and cleanup.
+- [x] Implement explicit owner routing; unsupported versions fail visibly, never fall through to local/default.
+- [x] Transport WebSocket text AND binary without String(data)/lossy UTF-8; cover ArrayBuffer/typed-array boundaries, early frames, close-during-connect and cleanup.
 - [ ] Port missing native capabilities by functional family: auth callbacks/keychain, grants/plugin sockets, connection/agent registry, media ranges/preview, microphone/hotkeys/windows/notifications/updater lifecycle.
 - [ ] Classify every 281 inventoried channel and any additional source methods; a no-op/null answer is not parity evidence.
 - [ ] Verify Rust tests and actual native adapters against fake services, including refusal/error paths.
@@ -70,7 +70,7 @@
 ## Phase 4: Unified navigation and state-preserving shell
 
 **Files:** upstream app/routes.ts, sidebar/navigation/layout and related stores; Task/Workspace integration.
-- [ ] Map old routes/deep links to Chat, Tasks & agents, Automations, Connections, Skills & tools, Library and Settings.
+- [x] Map old routes/deep links to Chat, Tasks & agents, Automations, Connections, Skills & tools, Library and Settings.
 - [ ] Preserve command palette, contributed routes and skill/quick-command completion.
 - [ ] Integrate code/review workflow with complete original chat/attachments/terminal/browser rather than replacing them with simplified approximations.
 - [ ] Test rapid navigation/profile switching, drafts, retained live panes, compact drawers, keyboard focus/reduced motion and native window minima.
@@ -80,7 +80,7 @@
 
 **Files:** upstream settings/{index,constants,helpers,settings-manifest,settings-search,config-settings,subpages} and field editors; api/models.ts; model-picker.tsx; provider/custom-endpoint stores; inventory coverage tests.
 - [ ] Generate coverage assertions from all 1,055 inventory rows plus dynamic runtime schemas; every key/control maps to a destination or justified conditional state.
-- [ ] Implement nine-category navigation, synonyms/exact-key search, All settings catalogue, legacy redirects and contextual advanced disclosure.
+- [x] Implement nine-category navigation, synonyms/exact-key search, All settings catalogue, legacy redirects and contextual advanced disclosure.
 - [ ] Test unknown keys/enums/provider options, empty collections, secret keep/replace/clear, scoped differences, revision conflicts, restart/next-session activation and unsaved edits across scope changes.
 - [ ] Retain searchable/ranked/custom model picker and provider auth/keys/custom endpoints/local-model availability; current-chat selection and new-chat defaults remain distinct.
 - [ ] Verify invalid auth/unavailable models, stale provider lists, active-turn switch semantics, rollback, two same-named remote profiles, fallback/auxiliary/delegation/MoA routes.
@@ -106,7 +106,7 @@
 ## Phase 8: Messaging, service accounts, skills, plugins and MCP
 
 **Files:** existing messaging/setup/pairing modules; capabilities/{connectors,skills,plugins,toolsets}; api adapters; Rust OAuth/grant/plugin lifecycle.
-- [ ] Preserve dynamic catalogs and source-qualified identities, not hard-coded brand grids.
+- [x] Preserve dynamic catalogs and source-qualified identities, not hard-coded brand grids.
 - [ ] Exercise Telegram QR/manual/relay setup, expiry/cancel/access review and other source adapters; account readiness and direct/relay exclusivity remain distinct.
 - [ ] Retain hosted multi-account/policy/tool-selection flows and revision-safe updates.
 - [ ] Preserve MCP transport/import/unknown keys/env/headers/OAuth/probes/resources/tools/filter semantics; include:[] means zero tools. Callback is owned by desktop machine even for remote backend.
@@ -139,6 +139,10 @@
 - [ ] Run Rust and upstream UI/schema/contract tests in their supported runners; execute native WebKit tests and actual test-run inspector scenarios, all nine Settings groups, every route and plugin family.
 - [ ] Verify all inventory entries and dynamic-family coverage, complete scoped workflows, keyboard/contrast/reduced-motion and compact states; record blocked provider/hardware checks as unverified.
 - [ ] Update actual support docs and obtain user review of final evidence. No blanket all-pass, all-Rust, universal test detection or optimization claims.
+
+## Latest acceptance evidence
+
+[Native integration pass](../../implementation/NATIVE_INTEGRATION_PASS.md) records current implementation, scoped checks, native observations and unresolved release blockers. Checked items record implementation evidence; they do not imply that an entire phase passed live-service acceptance.
 
 ## Handoff
 

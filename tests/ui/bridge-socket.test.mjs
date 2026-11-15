@@ -44,7 +44,7 @@ function harness() {
       return Promise.resolve(() => group.delete(callback))
     } }
   } }
-  const context = { window, EventTarget, Event, CloseEvent, MessageEvent, Blob,
+  const context = { window, btoa, EventTarget, Event, CloseEvent, MessageEvent, Blob,
     ArrayBuffer, Uint8Array, URL, console: { ...console }, setTimeout(callback) { timers.push(callback) },
     document: { addEventListener() {} }, location: { href: 'tauri://localhost' } }
   vm.runInNewContext(source.replace('__HERMES_BOOTSTRAP__', '{}'), context)
@@ -139,4 +139,54 @@ test('the desktop surface the renderer calls is present and routes to its channe
   await desktop.openExternal('https://example.com/a?b=c')
   const open = h.calls.find(x => x.args.channel === 'hermes:openExternal')
   assert.equal(open.args.args[0], 'https://example.com/a?b=c')
+})
+
+test('native peer and session windows preserve their explicit owner and watch flag', async () => {
+  const h = harness()
+  await h.window.hermesDesktop.openWindow({ connectionId: null, profile: 'work' })
+  await h.window.hermesDesktop.openSessionWindow('a b/c', { connectionId: null, profile: 'work', watch: true })
+  assert.deepEqual(h.calls.map(x => [x.args.channel, JSON.parse(JSON.stringify(x.args.args))]), [
+    ['hermes:window:openInstance', [{ connectionId: null, profile: 'work' }]],
+    ['hermes:window:openSession', ['a b/c', { connectionId: null, profile: 'work', watch: true }]]
+  ])
+})
+
+test('window relay and preference updates have working removable subscriptions', async () => {
+  const h = harness(), received = [], prefs = []
+  const off = h.window.hermesDesktop.windowRelay.onMessage(value => received.push(value))
+  const offPrefs = h.window.hermesDesktop.uiPreferences.onChanged(value => prefs.push(value))
+  await settle()
+  h.window.hermesDesktop.windowRelay.send({ type: 'session-changed', profile: 'work' })
+  h.emit('hermes:window:relay', { type: 'session-changed', profile: 'work' })
+  h.emit('hermes:ui-preferences:changed', { revision: 2, values: { theme: 'dark' } })
+  assert.equal(received.length, 1); assert.equal(prefs.length, 1)
+  off(); offPrefs(); h.emit('hermes:window:relay', {})
+  assert.equal(received.length, 1)
+  assert.equal(h.calls.at(-1).args.channel, 'hermes:window:relay')
+})
+
+test('socket diagnostics bound history and redact one-use ticket subprotocols', async () => {
+  const h = harness()
+  for (let n = 0; n < 80; n++) new h.window.WebSocket('ws://localhost:1234?ticket=private', ['hermes-gateway-ticket.private'])
+  await settle()
+  const log = h.window.__hermesSocketLog
+  assert.ok(log.length <= 64)
+  assert.ok(!JSON.stringify(log).includes('private'))
+})
+
+test('dropped files stage real bytes through native IPC and reject oversize before reading', async () => {
+  const h = harness()
+  await h.window.hermesDesktop.stageFileForAttach({ name: 'test.bin', size: 4, arrayBuffer: async () => new Uint8Array([0, 128, 255, 1]).buffer })
+  const staged = h.calls.find(call => call.args.channel === 'hermes:native:stage-file')
+  assert.equal(staged.args.args[0].name, 'test.bin')
+  assert.equal(staged.args.args[0].data, 'AID/AQ==')
+  await assert.rejects(h.window.hermesDesktop.stageFileForAttach({ name: 'huge.bin', size: 17 * 1024 * 1024, arrayBuffer: () => { throw new Error('should never read') } }), /16 MiB/)
+})
+
+test('media streaming keeps the clip session and profile in the native request', async () => {
+  const h = harness()
+  await h.window.hermesDesktop.getGatewayFileStreamUrl({ connectionId: 'local', profile: 'work', path: '/workspace/clip.mp3', sessionId: 'child-task' })
+  const call = h.calls.at(-1)
+  assert.equal(call.args.channel, 'hermes:native:file-stream-url')
+  assert.deepEqual(JSON.parse(JSON.stringify(call.args.args[0])), { connectionId: 'local', profile: 'work', path: '/workspace/clip.mp3', sessionId: 'child-task' })
 })

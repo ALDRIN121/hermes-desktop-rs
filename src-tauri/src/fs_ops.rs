@@ -137,23 +137,31 @@ pub fn read_plugin_source(raw_path: &str) -> Value {
 }
 
 fn data_url_for(path: &Path, bytes: &[u8]) -> String {
-    format!(
-        "data:{};base64,{}",
-        mime_for(path),
-        base64_encode(bytes)
-    )
+    format!("data:{};base64,{}", mime_for(path), base64_encode(bytes))
 }
 
 pub fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -208,7 +216,9 @@ pub fn read_dir(raw_path: &str) -> Value {
         .filter(|entry| entry.file_name() != ".DS_Store")
         .map(|entry| {
             let child = entry.path();
-            let is_directory = std::fs::metadata(&child).map(|m| m.is_dir()).unwrap_or(false);
+            let is_directory = std::fs::metadata(&child)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
             json!({
                 "name": entry.file_name().to_string_lossy(),
                 "path": child.to_string_lossy(),
@@ -316,7 +326,10 @@ pub fn reveal(raw_path: &str) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        open_with("xdg-open", &[&path.parent().unwrap_or(&path).to_string_lossy()])
+        open_with(
+            "xdg-open",
+            &[&path.parent().unwrap_or(&path).to_string_lossy()],
+        )
     }
 }
 
@@ -408,8 +421,7 @@ pub fn set_data_url_read_max_mb(home: &Path, max_mb: u64) -> Result<Value, Strin
 // --- composer attachments ---------------------------------------------------
 
 fn composer_images_dir() -> PathBuf {
-    home()
-        .join("Library/Application Support/Hermes/composer-images")
+    home().join("Library/Application Support/Hermes/composer-images")
 }
 
 pub fn save_image_buffer(payload: &Value) -> Result<Value, String> {
@@ -471,10 +483,7 @@ pub fn save_image_buffer(payload: &Value) -> Result<Value, String> {
 }
 
 fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    let cleaned: Vec<u8> = text
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
+    let cleaned: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let cleaned = match cleaned.iter().position(|b| *b == b',') {
         // Tolerate a full data URL as well as bare base64.
         Some(index) if cleaned[..index].contains(&b';') => cleaned[index + 1..].to_vec(),
@@ -503,6 +512,65 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// WebKit cannot expose a dragged File's native path. Stage bounded bytes in
+/// a private host directory so the ordinary attachment path can consume it.
+pub fn stage_file(home: &Path, payload: &Value) -> Result<Value, String> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    const MAX: usize = 16 * 1024 * 1024;
+    let name = payload["name"].as_str().ok_or("Missing attachment name")?;
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.len() > 255
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+    {
+        return Err("Invalid attachment name".into());
+    }
+    let data = payload["data"].as_str().ok_or("Missing attachment bytes")?;
+    if data.len() > MAX.div_ceil(3) * 4 {
+        return Err("Attachment exceeds the native 16 MiB staging limit".into());
+    }
+    let bytes = base64_decode(data).ok_or("Invalid attachment bytes")?;
+    if bytes.len() > MAX {
+        return Err("Attachment exceeds the native 16 MiB staging limit".into());
+    }
+    let directory = home.join("pastes");
+    match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let meta = std::fs::symlink_metadata(&directory).map_err(|e| e.to_string())?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err("Unsafe attachment staging directory".into());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    // Keep the complete original name as the suffix, without risking NAME_MAX.
+    let directory = directory.join(format!("attach-{}-{stamp}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|e| e.to_string())?;
+    let path = directory.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&directory);
+        return Err(error.to_string());
+    }
+    Ok(json!(path))
+}
+
 pub fn save_pasted_text(home: &Path, payload: &Value) -> Result<Value, String> {
     let text = payload
         .get("text")
@@ -526,14 +594,14 @@ pub fn save_pasted_text(home: &Path, payload: &Value) -> Result<Value, String> {
 
 pub fn read_clipboard() -> Result<Value, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    Ok(Value::String(
-        clipboard.get_text().unwrap_or_default(),
-    ))
+    Ok(Value::String(clipboard.get_text().unwrap_or_default()))
 }
 
 pub fn write_clipboard(text: &str) -> Result<bool, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    clipboard.set_text(text.to_string()).map_err(|e| e.to_string())?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -655,6 +723,21 @@ mod tests {
     }
 
     #[test]
+    fn staged_files_preserve_binary_bytes_and_cannot_escape_the_staging_directory() {
+        let home = std::env::temp_dir().join(format!("hermes-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let staged = stage_file(&home, &json!({"name":"test.bin","data":"AID/AQ=="})).unwrap();
+        let path = std::path::PathBuf::from(staged.as_str().unwrap());
+        assert!(path.starts_with(home.join("pastes")));
+        assert_eq!(std::fs::read(path).unwrap(), vec![0, 128, 255, 1]);
+        for name in ["../../outside", "/tmp/outside", "a/b", "a\\b", "", ".."] {
+            assert!(stage_file(&home, &json!({"name":name,"data":"eA=="})).is_err());
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn read_file_text_matches_the_renderer_contract() {
         let dir = scratch("text");
         let file = dir.join("note.md");
@@ -676,7 +759,10 @@ mod tests {
 
         let value = read_file_text(&file.to_string_lossy());
         assert_eq!(value["truncated"], true);
-        assert_eq!(value["text"].as_str().unwrap().len(), TEXT_PREVIEW_MAX_BYTES as usize);
+        assert_eq!(
+            value["text"].as_str().unwrap().len(),
+            TEXT_PREVIEW_MAX_BYTES as usize
+        );
     }
 
     #[test]

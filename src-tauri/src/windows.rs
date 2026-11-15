@@ -1,109 +1,183 @@
-//! Additional app windows: a peer full-chrome window (`openWindow`) and a
-//! single-session window (`openSessionWindow`).
-//!
-//! Electron could open both because each `BrowserWindow` carried its own
-//! startup route. The Rust shell had one window, so "open in new window" and
-//! ⌘⇧N silently did nothing — `canOpenNewWindow()` reads the bridge member, so
-//! its absence removed the affordance rather than failing loudly. Each window
-//! created here gets its own bootstrap script with its own route baked in, so
-//! two windows never fight over one global route.
-
-use std::sync::atomic::{AtomicU64, Ordering};
-
+//! Native peer/session windows use the renderer's query-before-hash contract.
+use hermes_contract::scope;
 use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 
-/// Monotonic label source. Window labels must be unique for the app's lifetime,
-/// and reusing "main" would make `get_webview_window` return the wrong one.
+#[derive(Default)]
+pub struct WindowRoutes(Mutex<HashMap<String, Value>>);
+impl WindowRoutes {
+    pub fn remember(&self, label: &str, profile: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .entry(label.into())
+            .or_insert_with(|| json!({"profile": profile, "connectionId": null}));
+    }
+    pub fn set(&self, label: &str, route: Value) -> Result<(), String> {
+        let valid = scope::requested_profile(&route);
+        // Retain an unsupported owner too: opening a peer must refuse that
+        // route rather than accidentally resurrect a previously local owner.
+        self.0.lock().unwrap().insert(label.into(), route);
+        valid.map(|_| ())
+    }
+    pub fn forget(&self, label: &str) {
+        self.0.lock().unwrap().remove(label);
+    }
+    pub fn inherited(&self, label: &str) -> Value {
+        self.0
+            .lock()
+            .unwrap()
+            .get(label)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+}
 static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
 
-/// Only in-app hash routes may be opened this way: a peer window reviews a
-/// screen, it does not browse an arbitrary URL with the shell's privileges.
-fn route_from_payload(payload: &Value) -> Option<String> {
-    let profile = payload
+fn window_url(session: Option<&str>, options: &Value, inherited: &Value) -> Result<String, String> {
+    let explicit = !options.is_null();
+    let route = if explicit { options } else { inherited };
+    if !route.is_null() && !route.is_object() {
+        return Err("Invalid window options".into());
+    }
+    scope::requested_profile(route)?;
+    let profile = route
         .get("profile")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty());
-    let session = payload
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty());
-
+        .filter(|s| !s.trim().is_empty());
+    let mut url = if session.is_some() {
+        "index.html?win=secondary"
+    } else {
+        "index.html?peer=1"
+    }
+    .to_owned();
+    if let Some(profile) = profile {
+        url.push_str(&format!(
+            "&profile={}&connectionId=",
+            urlencoding::encode(profile.trim())
+        ));
+        if session.is_none() && explicit {
+            url.push_str("&profileWindow=1");
+        }
+    }
     if let Some(session) = session {
-        // A session window is addressed by the session it shows, and keeps the
-        // profile that owns it so two same-named sessions never collide.
-        let mut route = format!("/?session={}", urlencoding::encode(session));
-        if let Some(profile) = profile {
-            route.push_str(&format!("&profile={}", urlencoding::encode(profile)));
+        if session.trim().is_empty() || session.len() > 200 || session.chars().any(char::is_control)
+        {
+            return Err("Invalid session id".into());
         }
-        if payload.get("watch").and_then(Value::as_bool) == Some(true) {
-            route.push_str("&watch=1");
-        }
-
-        return Some(route);
-    }
-
-    profile.map(|profile| format!("/?profile={}", urlencoding::encode(profile)))
-}
-
-/// Open (or focus) a window for one session. `watch` opens a spectator window
-/// that does not build an agent, which is what the subagent viewer uses.
-pub fn open_session_window(
-    app: &tauri::AppHandle,
-    session_id: &str,
-    opts: &Value,
-) -> Result<Value, String> {
-    let session_id = session_id.trim();
-    if session_id.is_empty() || session_id.len() > 200 {
-        return Ok(json!({ "ok": false, "error": "invalid session id" }));
-    }
-    // Session ids address a row, not a path: refuse separators and control
-    // characters so a crafted id cannot rewrite the route it is embedded in.
-    if session_id
-        .chars()
-        .any(|c| c.is_control() || c == '/' || c == '\\' || c == '\0')
-    {
-        return Ok(json!({ "ok": false, "error": "invalid session id" }));
-    }
-
-    let mut payload = opts.clone();
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("sessionId".into(), Value::String(session_id.to_string()));
-    }
-    Ok(spawn_window(app, "session", payload))
-}
-
-/// Open a peer full-chrome window, optionally pinned to a connection/profile.
-pub fn open_window(app: &tauri::AppHandle, options: &Value) -> Result<Value, String> {
-    Ok(spawn_window(app, "peer", options.clone()))
-}
-
-fn spawn_window(app: &tauri::AppHandle, kind: &str, payload: Value) -> Value {
-    let route = route_from_payload(&payload);
-    let label = format!("{kind}-{}", NEXT_WINDOW.fetch_add(1, Ordering::Relaxed));
-    let script = match crate::bootstrap_script_for(app) {
-        Some(script) => script,
-        None => return json!({ "ok": false, "error": "shell bootstrap unavailable" }),
-    };
-
-    let built = tauri::WebviewWindowBuilder::new(
-        app,
-        &label,
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title("Hermes")
-    .inner_size(1180.0, 820.0)
-    .min_inner_size(720.0, 480.0)
-    .initialization_script(&script)
-    .build();
-
-    match built {
-        Ok(window) => {
-            if let Some(route) = route {
-                let literal = serde_json::to_string(&route).unwrap_or_else(|_| "\"\"".into());
-                let _ = window.eval(&format!("location.hash = {literal};"));
+        if let Some(watch) = options.get("watch") {
+            if !watch.is_boolean() {
+                return Err("Invalid watch flag".into());
             }
-            json!({ "ok": true })
+            if watch == true {
+                url.push_str("&watch=1");
+            }
         }
-        Err(error) => json!({ "ok": false, "error": error.to_string() }),
+        url.push_str(&format!("#/{}", urlencoding::encode(session)));
+    }
+    Ok(url)
+}
+
+pub fn open(
+    app: &tauri::AppHandle,
+    home: &PathBuf,
+    session: Option<&str>,
+    options: &Value,
+    inherited: &Value,
+) -> Result<Value, String> {
+    let url = window_url(session, options, inherited)?;
+    let kind = if session.is_some() { "session" } else { "peer" };
+    let label = format!("{kind}-{}", NEXT_WINDOW.fetch_add(1, Ordering::Relaxed));
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
+        .title("Hermes")
+        .inner_size(1180.0, 820.0)
+        .min_inner_size(720.0, 480.0)
+        .initialization_script(crate::bootstrap_script(home))
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(json!({"ok": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn explicit_active_route_wins_over_later_background_profile_reads() {
+        let routes = WindowRoutes::default();
+        routes.remember("main", "default");
+        routes
+            .set("main", json!({"profile":"work","connectionId":null}))
+            .unwrap();
+        routes.remember("main", "other");
+        assert_eq!(routes.inherited("main")["profile"], "work");
+        assert!(routes
+            .set(
+                "main",
+                json!({"profile":"work","connectionId":"unsupported-remote"})
+            )
+            .is_err());
+        assert!(window_url(None, &Value::Null, &routes.inherited("main")).is_err());
+    }
+    #[test]
+    fn session_uses_source_query_contract_and_encodes_route() {
+        assert_eq!(
+            window_url(
+                Some("a b/c?#"),
+                &json!({"profile":"work", "connectionId":null,"watch":true}),
+                &Value::Null
+            )
+            .unwrap(),
+            "index.html?win=secondary&profile=work&connectionId=&watch=1#/a%20b%2Fc%3F%23"
+        );
+    }
+    #[test]
+    fn peer_inherits_current_owner_without_permanent_profile_pin() {
+        let owner = json!({"profile":"work","connectionId":null});
+        assert_eq!(
+            window_url(None, &Value::Null, &owner).unwrap(),
+            "index.html?peer=1&profile=work&connectionId="
+        );
+        assert!(window_url(None, &owner, &Value::Null)
+            .unwrap()
+            .ends_with("&profileWindow=1"));
+    }
+    #[test]
+    fn omitted_session_options_still_route_to_session() {
+        assert_eq!(
+            window_url(Some("task"), &Value::Null, &Value::Null).unwrap(),
+            "index.html?win=secondary#/task"
+        );
+    }
+    #[test]
+    fn invalid_owners_or_window_payloads_fail_before_creation() {
+        for options in [
+            json!({"connectionId":"remote","profile":"work"}),
+            json!({"profile":"../private"}),
+            json!("work"),
+            json!({"profile":5}),
+            json!({"watch":"yes"}),
+        ] {
+            assert!(window_url(Some("task"), &options, &Value::Null).is_err());
+        }
+        for id in ["", "\n", "task\0other"] {
+            assert!(window_url(Some(id), &Value::Null, &Value::Null).is_err());
+        }
+    }
+    #[test]
+    fn window_routes_are_independent_and_retired_on_close() {
+        let routes = WindowRoutes::default();
+        routes.remember("main", "default");
+        routes.remember("peer-1", "work");
+        assert_eq!(routes.inherited("main")["profile"], "default");
+        assert_eq!(routes.inherited("peer-1")["profile"], "work");
+        routes.forget("peer-1");
+        assert_eq!(routes.inherited("peer-1"), Value::Null);
     }
 }

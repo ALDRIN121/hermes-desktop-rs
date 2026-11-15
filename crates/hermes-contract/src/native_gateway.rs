@@ -166,8 +166,18 @@ pub fn resolve(home: &Path, profile: Option<&str>) -> Result<NativeGateway, Stri
     })
 }
 
+fn validate_ticket_purpose(purpose: &str) -> Result<(), String> {
+    match purpose {
+        "interactive" | "native-http" | "native-profile-create" | "native-profile-registry" => {
+            Ok(())
+        }
+        _ => Err("Unsupported native gateway ticket purpose".into()),
+    }
+}
+
 impl NativeGateway {
     pub fn mint(&self, purpose: &str) -> Result<String, String> {
+        validate_ticket_purpose(purpose)?;
         let mut params =
             json!({"profile_id":self.profile_id,"instance_id":self.instance_id,"purpose":purpose});
         if purpose == "interactive" {
@@ -218,6 +228,19 @@ mod tests {
         (home, thread)
     }
 
+    #[test]
+    fn native_ticket_purposes_match_the_runtime_contract() {
+        for purpose in [
+            "interactive",
+            "native-http",
+            "native-profile-create",
+            "native-profile-registry",
+        ] {
+            assert!(validate_ticket_purpose(purpose).is_ok());
+        }
+        assert!(validate_ticket_purpose("media").is_err());
+        assert!(validate_ticket_purpose("").is_err());
+    }
     #[test]
     fn resolves_the_named_profile_and_keeps_authoritative_control_identity() {
         let (home, server) = fixture(json!({"protocol":1,"id":1,"ok":true,"result":{

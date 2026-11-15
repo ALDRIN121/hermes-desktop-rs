@@ -84,6 +84,111 @@ mod owner_tests {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
     #[test]
+    fn media_stream_uses_native_http_grant_and_session_owner() {
+        media_stream_fixture("bytes=1-2", "bytes=1-2", 2, "bytes 1-2/4");
+    }
+    #[test]
+    fn large_media_open_ended_range_is_served_as_a_bounded_seekable_chunk() {
+        media_stream_fixture(
+            "bytes=0-",
+            "bytes=0-2097151",
+            2 * 1024 * 1024,
+            "bytes 0-2097151/104857600",
+        );
+    }
+    fn media_stream_fixture(
+        browser_range: &str,
+        upstream_range: &str,
+        body_size: usize,
+        content_range: &str,
+    ) {
+        let home = std::env::temp_dir().join(format!(
+            "hermes-media-owner-{}-{body_size}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let control = UnixListener::bind(home.join("gateway.sock")).unwrap();
+        std::fs::set_permissions(
+            home.join("gateway.sock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let http = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", http.local_addr().unwrap());
+        let control_home = home.clone();
+        let issuer = std::thread::spawn(move || {
+            for verb in ["resolve-profile", "session-ticket"] {
+                let (mut client, _) = control.accept().unwrap();
+                client
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut raw = String::new();
+                BufReader::new(client.try_clone().unwrap())
+                    .read_line(&mut raw)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(request["verb"], verb);
+                let result = if verb == "resolve-profile" {
+                    json!({"resolve_protocol":1,"state":"ready","attachable":true,"update_fenced":false,"endpoint":{
+                        "runtime_protocol":1,"api_origin":origin,"ws_url":origin.replacen("http:","ws:",1)+"/api/ws",
+                        "profile_id":control_home.join("profiles/work"),"control_home":control_home,"instance_id":"media-work"
+                    }})
+                } else {
+                    assert_eq!(request["params"]["purpose"], "native-http");
+                    json!({"ticket":"fixture-media-grant"})
+                };
+                writeln!(
+                    client,
+                    "{}",
+                    json!({"protocol":1,"id":1,"ok":true,"result":result})
+                )
+                .unwrap();
+            }
+        });
+        let upstream_range = upstream_range.to_owned();
+        let response_range = content_range.to_owned();
+        let backend = std::thread::spawn(move || {
+            let (mut client, _) = http.accept().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(client.try_clone().unwrap());
+            let mut raw = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                raw.push_str(&line);
+            }
+            assert!(raw.contains("session_id=child-task"), "{raw}");
+            assert!(raw.contains("profile=work"), "{raw}");
+            assert!(raw
+                .to_ascii_lowercase()
+                .contains("x-hermes-gateway-ticket: fixture-media-grant"));
+            assert!(raw
+                .to_ascii_lowercase()
+                .contains(&format!("range: {upstream_range}")));
+            write!(client,"HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\nContent-Range: {response_range}\r\nContent-Length: {body_size}\r\nConnection: close\r\n\r\n").unwrap();
+            client.write_all(&vec![42; body_size]).unwrap();
+        });
+        let reply = remote_media_response_for(
+            &home,
+            "%2Fworkspace%2Fclip.mp3?connectionId=local&profile=work&sessionId=child-task",
+            Some(browser_range),
+        );
+        assert_eq!(reply.status(), 206);
+        assert_eq!(reply.body().len(), body_size);
+        assert_eq!(reply.body().first(), Some(&42));
+        assert_eq!(reply.headers()["content-range"], content_range);
+        issuer.join().unwrap();
+        backend.join().unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn foreign_connection_and_conflicting_profile_never_touch_the_default_home() {
         let absent = Path::new("/not-a-hermes-fixture-home");
         let foreign: HermesApiRequest = serde_json::from_value(
@@ -447,6 +552,52 @@ fn parse_range(header: Option<&str>, total: u64) -> Option<(u64, u64)> {
 /// resolves the owning connection, mints a grant and forwards the request —
 /// including `Range`, so seeking still works — and hands back the bytes.
 fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http::Response<Vec<u8>> {
+    remote_media_response_for(&crate::hermes_home(), tail, range_header)
+}
+
+/// WebKit commonly requests `bytes=N-`. Bound the upstream response itself,
+/// keeping Content-Range authoritative so the player can request the next seek.
+fn media_request_range(header: Option<&str>) -> Result<String, String> {
+    const CHUNK: u64 = 2 * 1024 * 1024;
+    let Some(header) = header else {
+        return Ok(format!("bytes=0-{}", CHUNK - 1));
+    };
+    let raw = header
+        .trim()
+        .strip_prefix("bytes=")
+        .ok_or("Invalid media byte range")?;
+    let (start, end) = raw.split_once('-').ok_or("Invalid media byte range")?;
+    let number = |text: &str| -> Result<u64, String> {
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("Invalid media byte range".into());
+        }
+        text.parse().map_err(|_| "Invalid media byte range".into())
+    };
+    if start.is_empty() {
+        let size = number(end)?;
+        if size == 0 {
+            return Err("Invalid media byte range".into());
+        }
+        return Ok(format!("bytes=-{}", size.min(CHUNK)));
+    }
+    let start = number(start)?;
+    let cap = start.saturating_add(CHUNK - 1);
+    let end = if end.is_empty() {
+        cap
+    } else {
+        number(end)?.min(cap)
+    };
+    if end < start {
+        return Err("Invalid media byte range".into());
+    }
+    Ok(format!("bytes={start}-{end}"))
+}
+
+fn remote_media_response_for(
+    home: &Path,
+    tail: &str,
+    range_header: Option<&str>,
+) -> tauri::http::Response<Vec<u8>> {
     let fail = |status: u16, message: &str| {
         tauri::http::Response::builder()
             .status(status)
@@ -455,6 +606,10 @@ fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http:
             .unwrap()
     };
 
+    let range = match media_request_range(range_header) {
+        Ok(range) => range,
+        Err(error) => return fail(416, &error),
+    };
     let (raw, query) = tail.split_once('?').unwrap_or((tail, ""));
     let path = urlencoding::decode(raw)
         .map(|p| p.into_owned())
@@ -465,6 +620,7 @@ fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http:
 
     let mut profile: Option<String> = None;
     let mut connection_id: Option<String> = None;
+    let mut session_id: Option<String> = None;
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let value = urlencoding::decode(value)
@@ -473,34 +629,39 @@ fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http:
         match key {
             "profile" if !value.is_empty() => profile = Some(value),
             "connectionId" if !value.is_empty() => connection_id = Some(value),
+            "sessionId" if !value.is_empty() => session_id = Some(value),
             _ => {}
         }
     }
 
-    let home = crate::hermes_home();
     let owner = match crate::commands::resolve_owner(
-        &home,
+        home,
         &json!({ "connectionId": connection_id, "profile": profile }),
     ) {
         Ok(owner) => owner,
         Err(error) => return fail(502, &format!("remote media: {error}")),
     };
-    let ticket = match owner.mint("media") {
+    let ticket = match owner.mint("native-http") {
         Ok(ticket) => ticket,
         Err(error) => return fail(502, &format!("remote media: {error}")),
     };
-    let url = format!(
-        "{}/api/files/stream?path={}",
+    let mut url = format!(
+        "{}/api/files/stream?path={}&profile={}",
         owner.connection.base_url.trim_end_matches('/'),
-        urlencoding::encode(&path)
+        urlencoding::encode(&path),
+        urlencoding::encode(owner.connection.profile.as_deref().unwrap_or("default"))
     );
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    if let Some(session) = session_id {
+        url.push_str(&format!("&session_id={}", urlencoding::encode(&session)));
+    }
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(30))
+        .build();
     let mut request = agent
         .request("GET", &url)
         .set("X-Hermes-Gateway-Ticket", &ticket);
-    if let Some(range) = range_header {
-        request = request.set("Range", range);
-    }
+    request = request.set("Range", &range);
     if !owner.connection.token.is_empty() {
         request = request.set(
             "Authorization",
@@ -510,7 +671,7 @@ fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http:
 
     let response = match request.call() {
         Ok(response) => response,
-        Err(ureq::Error::Status(416, _)) => return fail(416, "range not satisfiable"),
+        Err(ureq::Error::Status(416, response)) => response,
         Err(ureq::Error::Status(code, _)) => {
             return fail(code, &format!("remote media: gateway answered {code}"))
         }
@@ -524,12 +685,23 @@ fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http:
         .to_string();
     let content_range = response.header("content-range").map(str::to_string);
     let mut bytes = Vec::new();
-    if std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes).is_err() {
+    const MAX_MEDIA_REPLY: u64 = 64 * 1024 * 1024;
+    use std::io::Read;
+    if response
+        .into_reader()
+        .take(MAX_MEDIA_REPLY + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
         return fail(502, "remote media: read failed");
     }
 
+    if bytes.len() as u64 > MAX_MEDIA_REPLY {
+        return fail(413, "Media response exceeded the 64 MiB range limit");
+    }
     let mut builder = tauri::http::Response::builder()
         .status(status)
+        .header("content-length", bytes.len().to_string())
         .header("content-type", mime)
         .header("accept-ranges", "bytes")
         .header("access-control-allow-origin", "*");
@@ -547,11 +719,20 @@ pub async fn hermes_ws_open(
     url: String,
     protocols: Option<Vec<String>>,
 ) -> Result<u64, String> {
+    use tauri::Manager;
+    let prepared = app
+        .state::<crate::plugin_dial::PreparedDials>()
+        .take(window.label(), &url)?;
+    let (url, ticket) = match prepared {
+        Some((url, ticket)) => (url, Some(ticket)),
+        None => (url, None),
+    };
     crate::gateway_ws::open(
         app,
         registry.inner().clone(),
         url,
         protocols.unwrap_or_default(),
+        ticket,
         window.label().to_owned(),
     )
     .await
@@ -559,20 +740,28 @@ pub async fn hermes_ws_open(
 
 #[tauri::command]
 pub fn hermes_ws_send(
+    window: tauri::WebviewWindow,
     registry: tauri::State<'_, std::sync::Arc<crate::gateway_ws::SocketRegistry>>,
     id: u64,
     data: Value,
     binary: Option<bool>,
 ) -> Result<(), String> {
-    crate::gateway_ws::send(registry.inner(), id, data, binary.unwrap_or(false))
+    crate::gateway_ws::send(
+        registry.inner(),
+        window.label(),
+        id,
+        data,
+        binary.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
 pub fn hermes_ws_close(
+    window: tauri::WebviewWindow,
     registry: tauri::State<'_, std::sync::Arc<crate::gateway_ws::SocketRegistry>>,
     id: u64,
 ) -> Result<(), String> {
-    crate::gateway_ws::close(registry.inner(), id);
+    crate::gateway_ws::close(registry.inner(), window.label(), id);
     Ok(())
 }
 
@@ -673,12 +862,19 @@ pub fn stamp_first_paint() {
     if std::env::var("HERMES_MEASURE_STARTUP").is_err() {
         return;
     }
-    let elapsed = STARTED.get().map(|at| at.elapsed().as_millis()).unwrap_or(0);
+    let elapsed = STARTED
+        .get()
+        .map(|at| at.elapsed().as_millis())
+        .unwrap_or(0);
     let path = std::env::temp_dir().join("hermes-rust-first-paint.json");
-    let _ = std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
-        "firstPaintMs": elapsed,
-        "pid": std::process::id()
-    })).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "firstPaintMs": elapsed,
+            "pid": std::process::id()
+        }))
+        .unwrap_or_default(),
+    );
 }
 
 /// Process start reference for `stamp_first_paint`. Set once at the top of
@@ -762,6 +958,11 @@ pub async fn hermes_ipc(
             }
             prefs.revision = prefs.revision.saturating_add(1);
             save_preferences(&state.home, &prefs)?;
+            {
+                use tauri::Emitter;
+                app.emit("hermes:ui-preferences:changed", &prefs)
+                    .map_err(|e| e.to_string())?;
+            }
             Ok(serde_json::to_value(prefs).map_err(|e| e.to_string())?)
         }
 
@@ -795,6 +996,11 @@ pub async fn hermes_ipc(
 
         "hermes:connection" | "hermes:connection:for" => {
             let owner = resolve_native_async(state.home.clone(), arg(&args, 0)).await?;
+            use tauri::Manager;
+            app.state::<crate::windows::WindowRoutes>().remember(
+                window.label(),
+                owner.connection.profile.as_deref().unwrap_or("default"),
+            );
             Ok(serde_json::to_value(owner.connection).map_err(|e| e.to_string())?)
         }
 
@@ -803,6 +1009,25 @@ pub async fn hermes_ipc(
                 .await
                 .is_ok();
             Ok(json!({ "ok": rebuilt, "rebuilt": rebuilt }))
+        }
+
+        "hermes:plugin:ws-url" => {
+            use tauri::Manager;
+            let payload = arg(&args, 0);
+            let path = crate::plugin_dial::plugin_path(
+                payload["pluginId"].as_str().unwrap_or_default(),
+                payload["path"].as_str().unwrap_or_default(),
+            )?;
+            let owner = resolve_native_async(state.home.clone(), payload).await?;
+            let ticket = owner.mint("native-http")?;
+            Ok(json!(app
+                .state::<crate::plugin_dial::PreparedDials>()
+                .prepare(
+                    window.label(),
+                    &owner.connection.base_url,
+                    &path,
+                    ticket
+                )?))
         }
 
         "hermes:gateway:ws-url" | "hermes:gateway:ws-url-for" => {
@@ -831,6 +1056,74 @@ pub async fn hermes_ipc(
             "version": env!("CARGO_PKG_VERSION"),
             "shell": "rust"
         })),
+
+        "hermes:mcp-oauth:listen" | "hermes:mcp-oauth:wait" | "hermes:mcp-oauth:cancel" => {
+            use tauri::Manager;
+            let registry = app
+                .state::<std::sync::Arc<crate::oauth_callback::CallbackRegistry>>()
+                .inner()
+                .clone();
+            let id = arg(&args, 0);
+            match channel.as_str() {
+                "hermes:mcp-oauth:listen" => registry.listen(window.label()).await,
+                "hermes:mcp-oauth:wait" => {
+                    registry
+                        .wait(
+                            window.label(),
+                            id.as_str().unwrap_or_default(),
+                            arg(&args, 1).as_u64().unwrap_or(300_000),
+                        )
+                        .await
+                }
+                _ => Ok(json!(
+                    registry.cancel(window.label(), id.as_str().unwrap_or_default())
+                )),
+            }
+        }
+        "hermes:window:relay" => {
+            use tauri::{Emitter, Manager};
+            let payload = arg(&args, 0);
+            if payload.to_string().len() > 1024 * 1024 {
+                return Err("Window relay payload exceeded limit".into());
+            }
+            for (label, _) in app.webview_windows() {
+                if label != window.label()
+                    && (label == "main"
+                        || label.starts_with("peer-")
+                        || label.starts_with("session-"))
+                {
+                    app.emit_to(label, "hermes:window:relay", &payload)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(Value::Null)
+        }
+        "hermes:connection:active-route" => {
+            use tauri::Manager;
+            app.state::<crate::windows::WindowRoutes>()
+                .set(window.label(), arg(&args, 0))?;
+            Ok(Value::Null)
+        }
+        "hermes:window:openInstance" | "hermes:window:openSession" => {
+            use tauri::Manager;
+            let inherited = app
+                .state::<crate::windows::WindowRoutes>()
+                .inherited(window.label());
+            let session = if channel == "hermes:window:openSession" {
+                Some(
+                    args.first()
+                        .and_then(Value::as_str)
+                        .ok_or("Invalid session id")?,
+                )
+            } else {
+                None
+            };
+            let options = arg(&args, if session.is_some() { 1 } else { 0 });
+            match crate::windows::open(&app, &state.home, session, &options, &inherited) {
+                Ok(result) => Ok(result),
+                Err(error) => Ok(json!({"ok":false,"error":error})),
+            }
+        }
 
         "hermes:window-control" => {
             match arg(&args, 0).as_str().unwrap_or_default() {
@@ -949,6 +1242,37 @@ pub async fn hermes_ipc(
 
         "hermes:saveImageBuffer" => fs_ops::save_image_buffer(&arg(&args, 0)),
 
+        "hermes:native:file-stream-url" => {
+            let payload = arg(&args, 0);
+            scope::requested_profile(&payload)?;
+            let path = payload["path"]
+                .as_str()
+                .filter(|path| !path.is_empty() && path.len() <= 16384)
+                .ok_or("Invalid media path")?;
+            let mut url = format!("hermes-media://remote/{}", urlencoding::encode(path));
+            let mut pairs = Vec::new();
+            for key in ["connectionId", "profile", "sessionId"] {
+                match payload.get(key) {
+                    Some(Value::String(value)) => {
+                        pairs.push(format!("{}={}", key, urlencoding::encode(value)))
+                    }
+                    None | Some(Value::Null) => {}
+                    _ => return Err(format!("Invalid media {key}")),
+                }
+            }
+            if !pairs.is_empty() {
+                url.push('?');
+                url.push_str(&pairs.join("&"));
+            }
+            Ok(json!(url))
+        }
+        "hermes:native:stage-file" => {
+            let home = state.home.clone();
+            let payload = arg(&args, 0);
+            tauri::async_runtime::spawn_blocking(move || fs_ops::stage_file(&home, &payload))
+                .await
+                .map_err(|e| e.to_string())?
+        }
         "hermes:savePastedText" => fs_ops::save_pasted_text(&state.home, &arg(&args, 0)),
 
         // --- embedded terminal ----------------------------------------------
@@ -1245,12 +1569,17 @@ pub async fn hermes_ipc(
 
         "hermes:zoom:set-percent" => {
             let percent = arg(&args, 0).as_f64().unwrap_or(100.0);
-            window.set_zoom((percent / 100.0).clamp(0.5, 2.0)).map_err(|e| e.to_string())?;
+            window
+                .set_zoom((percent / 100.0).clamp(0.5, 2.0))
+                .map_err(|e| e.to_string())?;
             let result = system_ops::zoom_state(&state.zoom, percent);
             let percent = result["percent"].as_f64().unwrap_or(100.0);
-            let payload = json!({ "level": (percent / 100.0).ln() / 1.2_f64.ln(), "percent": percent });
+            let payload =
+                json!({ "level": (percent / 100.0).ln() / 1.2_f64.ln(), "percent": percent });
             use tauri::Emitter;
-            window.emit("hermes:zoom:changed", &payload).map_err(|e| e.to_string())?;
+            window
+                .emit("hermes:zoom:changed", &payload)
+                .map_err(|e| e.to_string())?;
             Ok(payload)
         }
 
@@ -1323,23 +1652,71 @@ pub async fn hermes_ipc(
         }
 
         "hermes:watchPreviewFile" => {
-            let url = arg(&args, 0).as_str().unwrap_or_default().to_string();
-            tauri::async_runtime::spawn_blocking(move || {
-                crate::desktop_ops::watch_preview_file(&url)
-            })
-            .await
-            .map_err(|e| e.to_string())
+            use tauri::{Emitter, Manager};
+            let url = arg(&args, 0);
+            let owner = window.label().to_owned();
+            let events = app.clone();
+            let target = owner.clone();
+            app.state::<crate::preview_watch::PreviewWatches>().start(
+                &owner,
+                url.as_str().unwrap_or_default(),
+                move |event| {
+                    let _ = events.emit_to(target.as_str(), "hermes:preview-file-changed", event);
+                },
+            )
+        }
+        "hermes:stopPreviewFileWatch" => {
+            use tauri::Manager;
+            Ok(json!(app
+                .state::<crate::preview_watch::PreviewWatches>()
+                .stop(
+                    window.label(),
+                    arg(&args, 0).as_str().unwrap_or_default()
+                )))
         }
 
         // Bootstrap repair is an installer concern; this shell attaches to a
         // gateway it did not install, so there is nothing to repair.
         "hermes:bootstrap:repair" => Ok(json!({ "ok": true, "repaired": false })),
 
-        "hermes:prepared-submissions:read" => Ok(json!({ "submissions": [] })),
-
-        "hermes:vscode-theme:fetch" | "hermes:vscode-theme:search" => {
-            Ok(json!({ "ok": false, "error": "theme marketplace is not available in the Rust shell" }))
+        "hermes:prepared-submissions:read"
+        | "hermes:prepared-submissions:update"
+        | "hermes:prepared-submissions:compare-and-set" => {
+            use tauri::Manager;
+            let journal = app
+                .state::<std::sync::Arc<crate::prepared_journal::PreparedJournal>>()
+                .inner()
+                .clone();
+            let home = state.home.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if channel == "hermes:prepared-submissions:read" {
+                    return journal.read(&home).map(Value::String);
+                }
+                let key = args
+                    .first()
+                    .and_then(Value::as_str)
+                    .ok_or("Invalid prepared submission key")?;
+                let value = |index: usize| -> Result<Option<&str>, String> {
+                    match args.get(index) {
+                        Some(Value::Null) => Ok(None),
+                        Some(Value::String(value)) => Ok(Some(value)),
+                        _ => Err("Invalid prepared submission value".into()),
+                    }
+                };
+                if channel == "hermes:prepared-submissions:update" {
+                    journal.update(&home, key, value(1)?)?;
+                    Ok(Value::Null)
+                } else {
+                    journal.compare_and_set(&home, key, value(1)?, value(2)?)
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
         }
+
+        "hermes:vscode-theme:fetch" | "hermes:vscode-theme:search" => Ok(
+            json!({ "ok": false, "error": "theme marketplace is not available in the Rust shell" }),
+        ),
 
         other => Err(format!("unimplemented:{other}")),
     }
@@ -1391,6 +1768,33 @@ mod tests {
     }
 
     #[test]
+    fn gateway_media_ranges_are_bounded_without_losing_the_seek_start() {
+        assert_eq!(media_request_range(None).unwrap(), "bytes=0-2097151");
+        assert_eq!(
+            media_request_range(Some("bytes=10-")).unwrap(),
+            "bytes=10-2097161"
+        );
+        assert_eq!(
+            media_request_range(Some("bytes=10-12")).unwrap(),
+            "bytes=10-12"
+        );
+        assert_eq!(media_request_range(Some("bytes=-4")).unwrap(), "bytes=-4");
+        assert_eq!(
+            media_request_range(Some("bytes=-9999999")).unwrap(),
+            "bytes=-2097152"
+        );
+        for value in [
+            "bytes=-0",
+            "bytes=2-1",
+            "bytes=1-2,4-5",
+            "bytes=+-5",
+            "words=0-1",
+        ] {
+            assert!(media_request_range(Some(value)).is_err());
+        }
+    }
+
+    #[test]
     fn a_whole_file_is_served_without_a_range_and_offers_ranges() {
         let path = write_media("whole.txt", b"0123456789");
         let response = media_response(&uri_for(&path), None);
@@ -1437,7 +1841,9 @@ mod tests {
 
         assert_eq!(response.status(), 416);
         assert_eq!(response.headers()["content-range"], "bytes */10");
-        assert!(response.body().is_empty() || response.body().as_slice() == b"range not satisfiable");
+        assert!(
+            response.body().is_empty() || response.body().as_slice() == b"range not satisfiable"
+        );
     }
 
     #[test]
@@ -1467,15 +1873,20 @@ mod tests {
             media_response("hermes-media://stream/%2Fdefinitely%2Fnot%2Fhere", None).status(),
             404
         );
-        assert_eq!(media_response("hermes-media://nonsense/x", None).status(), 501);
+        assert_eq!(
+            media_response("hermes-media://nonsense/x", None).status(),
+            501
+        );
     }
 
     #[test]
     fn remote_media_reports_an_unreachable_gateway_instead_of_claiming_success() {
-        // No gateway is reachable in a unit test, so the honest answer is a
-        // gateway error — never a 200 with empty bytes, which a player would
-        // read as a zero-length clip.
-        let response = media_response("hermes-media://remote/%2Ftmp%2Fa.mp3", None);
+        // Never assume the user's gateway is absent. Own an empty test home.
+        let home =
+            std::env::temp_dir().join(format!("hermes-media-offline-{}", std::process::id()));
+        std::fs::create_dir(&home).unwrap();
+        let response = remote_media_response_for(&home, "%2Ftmp%2Fa.mp3", None);
+        std::fs::remove_dir(home).unwrap();
         assert!(
             response.status() == 502 || response.status() == 400,
             "unexpected status {}",

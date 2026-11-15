@@ -12,7 +12,6 @@ import { notify, notifyError } from '@/store/notifications'
 import { $settingsRequestProfile } from '@/store/settings-scope'
 import type { HermesConfigRecord } from '@/types/hermes'
 
-import { diffConfig, setNested } from './helpers'
 import { ListRow, SectionHeading, SettingsContent, ToggleRow } from './primitives'
 
 export type ConfigLeafKind = 'array' | 'boolean' | 'null' | 'number' | 'object' | 'string'
@@ -20,6 +19,8 @@ export type ConfigLeafKind = 'array' | 'boolean' | 'null' | 'number' | 'object' 
 export interface ConfigLeaf {
   /** Dotted path, exactly as config.yaml spells it. */
   path: string
+  segments: string[]
+  secret: boolean
   /** Top-level section, used for the group headings. */
   section: string
   value: unknown
@@ -52,19 +53,58 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
  * is still a leaf — an empty section is something a user can fill in, not
  * something to hide.
  */
-export function flattenConfig(record: HermesConfigRecord, prefix = '', out: ConfigLeaf[] = []): ConfigLeaf[] {
+export function flattenConfig(record: HermesConfigRecord, segments: string[] = [], out: ConfigLeaf[] = []): ConfigLeaf[] {
   for (const [key, value] of Object.entries(record ?? {})) {
-    const path = prefix ? `${prefix}.${key}` : key
-    const section = prefix ? prefix.split('.')[0]! : key
+    const parts = [...segments, key]
+    const path = parts.join('.')
+    const section = parts[0]!
 
     if (isPlainObject(value) && Object.keys(value).length > 0) {
-      flattenConfig(value, path, out)
+      flattenConfig(value, parts, out)
     } else {
-      out.push({ kind: kindOf(value), path, section, value })
+      const secret = parts.some(part => /(?:^|[_-])(?:api[_-]?key|token|secret|password|credential|authorization|private[_-]?key)(?:$|[_-])/i.test(part.replace(/([a-z])([A-Z])/g, '$1_$2')))
+      out.push({ kind: kindOf(value), path, section, secret, segments: parts, value })
     }
   }
 
   return out
+}
+
+/** Keep literal dots in dynamic keys; never re-interpret a display label as a path. */
+export function patchForLeaf(leaf: ConfigLeaf, value: unknown): HermesConfigRecord {
+  let patch = value
+
+  for (const segment of [...leaf.segments].reverse()) {
+    if (['__proto__', 'constructor', 'prototype'].includes(segment)) {
+      throw new Error('Unsafe config key')
+    }
+
+    patch = Object.fromEntries([[segment, patch]])
+  }
+
+  return patch as HermesConfigRecord
+}
+
+export function parseLeafInput(leaf: ConfigLeaf, text: string): unknown {
+  if (leaf.kind === 'string') {
+    return text
+  }
+
+  const parsed: unknown = leaf.kind === 'number' ? Number(text) : JSON.parse(text)
+
+  const finite = (value: unknown): boolean => {
+    if (typeof value === 'number') {
+      return Number.isFinite(value)
+    }
+
+    return value === null || typeof value !== 'object' || Object.values(value).every(finite)
+  }
+
+  if (text.trim() === '' || !finite(parsed) || (leaf.kind !== 'null' && kindOf(parsed) !== leaf.kind)) {
+    throw new Error('Invalid value type')
+  }
+
+  return parsed
 }
 
 function displayValue(leaf: ConfigLeaf): string {
@@ -88,7 +128,7 @@ export function filterLeaves(leaves: readonly ConfigLeaf[], query: string): Conf
   }
 
   return leaves.filter(
-    leaf => leaf.path.toLowerCase().includes(needle) || displayValue(leaf).toLowerCase().includes(needle)
+    leaf => leaf.path.toLowerCase().includes(needle) || (!leaf.secret && displayValue(leaf).toLowerCase().includes(needle))
   )
 }
 
@@ -109,31 +149,12 @@ function LeafEditor({ leaf, onCommit }: { leaf: ConfigLeaf; onCommit: (value: un
       return
     }
 
-    if (leaf.kind === 'array' || leaf.kind === 'object') {
-      try {
-        onCommit(JSON.parse(text))
-      } catch {
-        setError(copy.invalidJson)
-      }
-
-      return
+    try {
+      onCommit(parseLeafInput(leaf, text))
+      setError(null)
+    } catch {
+      setError(copy.invalidJson)
     }
-
-    if (leaf.kind === 'number') {
-      const parsed = Number(text)
-
-      if (text.trim() === '' || Number.isNaN(parsed)) {
-        setError(copy.invalidJson)
-
-        return
-      }
-
-      onCommit(parsed)
-
-      return
-    }
-
-    onCommit(text)
   }
 
   return (
@@ -141,6 +162,7 @@ function LeafEditor({ leaf, onCommit }: { leaf: ConfigLeaf; onCommit: (value: un
       <Input
         aria-invalid={error ? true : undefined}
         aria-label={leaf.path}
+        autoComplete="off"
         className="font-mono text-[0.75rem]"
         onBlur={commit}
         onChange={event => {
@@ -153,6 +175,7 @@ function LeafEditor({ leaf, onCommit }: { leaf: ConfigLeaf; onCommit: (value: un
           }
         }}
         spellCheck={false}
+        type={leaf.secret ? 'password' : 'text'}
         value={text}
       />
       {error && <p className="mt-1 text-[0.7rem] text-destructive">{error}</p>}
@@ -192,14 +215,12 @@ export function AllSettings() {
   }, [shown])
 
   const save = async (leaf: ConfigLeaf, value: unknown) => {
-    const next = setNested(config, leaf.path, value)
-    const patch = diffConfig(config, next)
-
-    if (Object.keys(patch).length === 0) {
-      return
-    }
-
     try {
+      if (JSON.stringify(value) === JSON.stringify(leaf.value)) {
+        return
+      }
+
+      const patch = patchForLeaf(leaf, value)
       const result = await saveHermesConfigRecord(patch, writeScope ?? profile ?? undefined)
 
       if (!result.ok) {
@@ -241,7 +262,7 @@ export function AllSettings() {
               <ListRow
                 action={<LeafEditor leaf={leaf} onCommit={value => void save(leaf, value)} />}
                 hint={leaf.kind}
-                key={JSON.stringify([editorScope, leaf.path])}
+                key={JSON.stringify([editorScope, leaf.segments, leaf.value])}
                 title={<span className="font-mono text-[0.78rem]">{leaf.path}</span>}
               />
             ))}

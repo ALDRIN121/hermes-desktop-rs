@@ -87,10 +87,24 @@ const responses = {
 }
 const json = (res, value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.json': 'application/json' }
+// Generated silence: no recorded voice, microphone, provider or user file.
+const silentWav = Buffer.alloc(44 + 24 * 48000 * 4)
+silentWav.write('RIFF', 0); silentWav.writeUInt32LE(silentWav.length - 8, 4); silentWav.write('WAVEfmt ', 8)
+silentWav.writeUInt32LE(16, 16); silentWav.writeUInt16LE(1, 20); silentWav.writeUInt16LE(2, 22)
+silentWav.writeUInt32LE(48000, 24); silentWav.writeUInt32LE(48000 * 4, 28); silentWav.writeUInt16LE(4, 32); silentWav.writeUInt16LE(16, 34)
+silentWav.write('data', 36); silentWav.writeUInt32LE(silentWav.length - 44, 40)
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://fixture.invalid')
   if (url.pathname.startsWith('/api/')) {
     console.log(`${req.method} ${url.pathname}`)
+    if (req.method === 'GET' && url.pathname === '/api/files/stream' && url.searchParams.get('path') === '/fixture/media/silent.wav') {
+      const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '')
+      const start = range ? Number(range[1]) : 0, end = Math.min(range?.[2] ? Number(range[2]) : silentWav.length - 1, silentWav.length - 1)
+      console.log(`MEDIA_RANGE ${start}-${end}/${silentWav.length} session=${url.searchParams.get('session_id')}`)
+      if (start >= silentWav.length || end < start) { res.writeHead(416, {'content-range':`bytes */${silentWav.length}`}); return res.end() }
+      res.writeHead(range ? 206 : 200, { 'content-type':'audio/wav', 'accept-ranges':'bytes', 'content-length':end - start + 1, ...(range ? {'content-range':`bytes ${start}-${end}/${silentWav.length}`} : {}) })
+      return res.end(silentWav.subarray(start, end + 1))
+    }
     if (req.method === 'POST' && url.pathname === '/api/webapp/socket-ticket') return json(res, { ticket: 'fixture-only' })
     if (req.method !== 'GET') return json(res, { error: 'This visual fixture is read-only.' }, 405)
     if (Object.hasOwn(responses, url.pathname)) return json(res, responses[url.pathname])

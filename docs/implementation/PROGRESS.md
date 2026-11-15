@@ -2,6 +2,10 @@
 
 Implementation authorized 15 November 2026. Working branch: `codex/full-hermes`. Generated UI images remain binding visual references; written design governs behavior.
 
+## Latest native integration pass
+
+See [native integration acceptance](NATIVE_INTEGRATION_PASS.md) for the newly wired windows, OAuth callbacks, private plugin dials, real preview watches, durable draft journal, dropped-file staging, session-aware media and settings edge cases. Native peer creation and draft isolation were observed in the fixture application. Full feature parity remains unfinished.
+
 ## Current work
 
 - GPUI clarification received: no GPUI implementation exists here or on the identified origin. Continue with the current Rust/Tauri and pinned React architecture; no further GPUI path search or speculative migration is required.

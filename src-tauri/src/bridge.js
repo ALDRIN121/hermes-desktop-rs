@@ -99,10 +99,7 @@
       snapshot: boot.uiPreferences || null,
       read: () => call('hermes:ui-preferences:read'),
       write: (payload) => call('hermes:ui-preferences:write', [payload]),
-      // No cross-window preference bus in the Rust shell yet: this window's
-      // own writes are applied locally, so the subscription is inert rather
-      // than wrong.
-      onChanged: unsubscribe
+      onChanged: callback => listen('hermes:ui-preferences:changed', callback)
     },
 
     // --- backend resolution --------------------------------------------------
@@ -111,6 +108,7 @@
     revalidateConnection: () => call('hermes:connection:revalidate'),
     getGatewayWsUrl: (profile) => call('hermes:gateway:ws-url', [profile === undefined ? null : profile]),
     getGatewayWsUrlFor: (payload) => call('hermes:gateway:ws-url-for', [payload]),
+    getPluginWsUrl: payload => call('hermes:plugin:ws-url', [payload]),
     getEmbedHostOrigin: () => call('hermes:embed-host:origin'),
 
     // --- REST transport ------------------------------------------------------
@@ -121,6 +119,19 @@
     getBootProgress: () => call('hermes:boot-progress:get'),
     getBootstrapState: () => call('hermes:bootstrap:get'),
     probeLocalBackend: () => call('hermes:local-backend:probe'),
+
+    setActiveConnectionRoute: route => send('hermes:connection:active-route', [route]),
+    windowRelay: {
+      send: payload => send('hermes:window:relay', [payload]),
+      onMessage: callback => listen('hermes:window:relay', callback)
+    },
+    mcpOauth: {
+      listen: () => call('hermes:mcp-oauth:listen'),
+      wait: (id, timeoutMs) => call('hermes:mcp-oauth:wait', [id, timeoutMs]),
+      cancel: id => call('hermes:mcp-oauth:cancel', [id])
+    },
+    openWindow: options => call('hermes:window:openInstance', [options]),
+    openSessionWindow: (id, opts) => call('hermes:window:openSession', [id, opts]),
 
     // --- window controls -----------------------------------------------------
     windowControls: {
@@ -144,21 +155,39 @@
       setDefaultProjectDir: (dir) => call('hermes:setting:defaultProjectDir:set', [dir]),
       pickDefaultProjectDir: () => call('hermes:setting:defaultProjectDir:pick')
     },
+    getGatewayFileStreamUrl: payload => call('hermes:native:file-stream-url', [payload]),
     saveGatewayFile: (payload) => call('hermes:saveGatewayFile', [payload]),
     saveImageFromUrl: (url) => call('hermes:saveImageFromUrl', [url]),
     normalizePreviewTarget: (target, baseDir) => call('hermes:normalizePreviewTarget', [target, baseDir]),
     watchPreviewFile: (url) => call('hermes:watchPreviewFile', [url]),
+    stopPreviewFileWatch: id => call('hermes:stopPreviewFileWatch', [id]),
+    onPreviewFileChanged: callback => listen('hermes:preview-file-changed', callback),
     repairBootstrap: () => call('hermes:bootstrap:repair'),
-    preparedSubmissions: { read: () => call('hermes:prepared-submissions:read') },
+    preparedSubmissions: {
+      read: () => call('hermes:prepared-submissions:read'),
+      update: (key, entry) => call('hermes:prepared-submissions:update', [key, entry]),
+      compareAndSet: (key, expected, entry) => call('hermes:prepared-submissions:compare-and-set', [key, expected, entry])
+    },
     themes: {
       fetchMarketplace: (id) => call('hermes:vscode-theme:fetch', [id]),
       searchMarketplace: (query) => call('hermes:vscode-theme:search', [query])
     },
 
-    // Staging a dropped file is a bytes operation the renderer can do itself
-    // (it already holds the File), but the Electron shape returns the staged
-    // path. Announce absence rather than a path that was never written.
     getPathForFile: () => '',
+    stageFileForAttach: async file => {
+      const max = 16 * 1024 * 1024
+      if (!file || typeof file.name !== 'string' || !Number.isFinite(file.size) || file.size < 0 || file.size > max) {
+        throw new Error('Attachment exceeds the native 16 MiB staging limit')
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      if (bytes.byteLength > max) throw new Error('Attachment exceeds the native 16 MiB staging limit')
+      const encoded = []
+      // Multiples of three keep all intermediate base64 chunks unpadded.
+      for (let offset = 0; offset < bytes.length; offset += 24576) {
+        encoded.push(btoa(String.fromCharCode(...bytes.subarray(offset, offset + 24576))))
+      }
+      return call('hermes:native:stage-file', [{ name: file.name, data: encoded.join('') }])
+    },
 
     // --- filesystem, dialogs, clipboard --------------------------------------
     readFileText: (filePath) => call('hermes:readFileText', [filePath]),
@@ -297,7 +326,7 @@
   const socketLog = []
   window.__hermesSocketLog = socketLog
   const NativeWS = window.WebSocket
-  const redact = (value) => String(value || '').replace(/ticket=[^&]*/g, 'ticket=<redacted>')
+  const redact = (value) => String(value || '').replace(/ticket=[^&]*/g, 'ticket=<redacted>').replace(/hermes-gateway-ticket\.[^,\s]+/g, 'hermes-gateway-ticket.<redacted>')
   const isLoopback = (url) => /^wss?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i.test(String(url))
 
   class IpcSocket extends EventTarget {
@@ -320,6 +349,7 @@
       this._outgoing = Promise.resolve()
       this._entry = { url: redact(url), protocols: protocols ? [].concat(protocols).map(redact) : null, events: [] }
       socketLog.push(this._entry)
+      if (socketLog.length > 64) socketLog.shift()
       this._connect(protocols ? [].concat(protocols) : [])
     }
 
@@ -380,6 +410,7 @@
         data = this.binaryType === 'arraybuffer' ? bytes.buffer : new Blob([bytes])
       }
       this._entry.events.push('message')
+      if (this._entry.events.length > 128) this._entry.events.shift()
       this._fire('message', new MessageEvent('message', { data }))
     }
 
@@ -486,22 +517,22 @@
       results.push({ name, ok, detail: String(detail === undefined ? '' : detail).slice(0, 240) })
 
     try {
-      const file = '~/.hermes/desktop-shell-selftest.txt'
+      const file = boot.home + '/desktop-shell-selftest.txt'
       const written = await desktop.writeTextFile(file, 'selftest-payload')
       record('fs:writeText', !!(written && written.path), JSON.stringify(written))
       const read = await desktop.readFileText(file)
       record('fs:readFileText', !!(read && read.text === 'selftest-payload'), JSON.stringify(read).slice(0, 160))
-      const dir = await desktop.readDir('~/.hermes')
+      const dir = await desktop.readDir(boot.home)
       record('fs:readDir', Array.isArray(dir.entries) && dir.entries.length > 0, (dir.entries || []).length + ' entries')
-      const root = await desktop.gitRoot('~/.hermes/hermes-agent')
+      const root = await desktop.gitRoot(boot.home + '/test-repo')
       record('fs:gitRoot', typeof root === 'string' && root.length > 0, String(root))
       const removed = await desktop.trashPath(file)
       record('fs:trash', removed === true, String(removed))
       const clip = await desktop.readClipboard()
-      record('clipboard:read', typeof clip === 'string', clip.slice(0, 40))
+      record('clipboard:read', typeof clip === 'string', 'text result (contents omitted)')
       const cap = await desktop.dataUrlReadMax.get()
       record('dataUrlReadMax:get', !!(cap && typeof cap.maxMb === 'number'), JSON.stringify(cap))
-      const dataUrl = await desktop.readFileDataUrl('~/.hermes/hermes-agent/README.md')
+      const dataUrl = await desktop.readFileDataUrl(boot.home + '/test-repo/README.md')
       record('readFileDataUrl', typeof dataUrl === 'string' && dataUrl.startsWith('data:'), String(dataUrl).slice(0, 40))
 
       const marker = 'shell-selftest-' + Date.now()
@@ -512,10 +543,9 @@
       const zoom = await desktop.zoom.get()
       record('zoom:get', !!(zoom && typeof zoom.percent === 'number'), JSON.stringify(zoom))
 
-      const repo = '~/.hermes/hermes-agent'
+      const repo = boot.home + '/test-repo'
       const status = await desktop.git.repoStatus(repo)
-      // The installed Hermes tree is a pinned, detached HEAD, so a null branch
-      // with detached:true is the correct answer there.
+      // The isolated fixture repository may be on a branch or detached.
       record(
         'git:repoStatus',
         !!(status && (typeof status.branch === 'string' || status.detached === true)),
@@ -561,6 +591,30 @@
 
     return results
   }
+  // Explicit, debug-only native media fixture. A user gesture starts muted
+  // playback; ordinary launches never create this panel or request media.
+  if (boot.mediaSelfTest === true) {
+    document.addEventListener('DOMContentLoaded', async () => {
+      const panel = document.createElement('aside')
+      panel.style.cssText = 'position:fixed;right:20px;top:80px;z-index:99999;padding:20px;background:#171d28;color:#edf2f7;border:1px solid #7878f5;border-radius:12px;font:14px system-ui;max-width:430px'
+      const title = document.createElement('h2'); title.textContent = 'Native media acceptance (isolated fixture)'
+      const status = document.createElement('p'); status.textContent = 'Preparing silent audio…'
+      const button = document.createElement('button'); button.textContent = 'Play silent media test'; button.disabled = true
+      button.style.cssText = 'padding:10px;background:#7878f5;color:white;border:0;border-radius:6px'
+      const audio = document.createElement('audio'); audio.controls = true; audio.muted = true; audio.playbackRate = 4
+      panel.append(title, status, button, audio); document.body.append(panel)
+      audio.addEventListener('timeupdate', () => { status.textContent = `Playing ${audio.currentTime.toFixed(1)} / ${Number.isFinite(audio.duration) ? audio.duration.toFixed(1) : '?'} seconds (muted)` })
+      audio.addEventListener('ended', () => { status.textContent = `PASS: ${audio.duration.toFixed(1)} seconds played across native media chunks (muted)` })
+      audio.addEventListener('error', () => { status.textContent = `FAIL: media error ${audio.error?.code ?? 'unknown'}` })
+      try {
+        audio.src = await desktop.getGatewayFileStreamUrl({connectionId:'local', profile:'default', sessionId:'media-fixture', path:'/fixture/media/silent.wav'})
+        status.textContent = 'Ready: 24-second silent fixture, 4× playback, muted'
+        button.disabled = false
+        button.addEventListener('click', () => { audio.play().catch(error => { status.textContent = 'FAIL: ' + error.message }) })
+      } catch (error) { status.textContent = 'FAIL: ' + error.message }
+    }, { once: true })
+  }
+
   const pending = boot.selfTest === true ? selfTest() : Promise.resolve(null)
 
   if (boot.selfTest === true) {

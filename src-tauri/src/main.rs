@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-fn hermes_home() -> PathBuf {
+pub fn hermes_home() -> PathBuf {
     std::env::var_os("HERMES_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

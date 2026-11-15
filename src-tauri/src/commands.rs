@@ -308,6 +308,13 @@ pub fn media_response(uri: &str, range_header: Option<&str>) -> tauri::http::Res
 
     let rest = uri.strip_prefix("hermes-media://").unwrap_or(uri);
     let (host, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    if host == "remote" {
+        // Remote gateway media: the renderer hands us the path plus the owning
+        // connection, because a remote OAuth gateway exposes no static token to
+        // the page. Fetching here keeps the credential in Rust and preserves
+        // Range so the player can still seek.
+        return remote_media_response(tail, range_header);
+    }
     if host != "stream" {
         return tauri::http::Response::builder()
             .status(501)
@@ -431,6 +438,105 @@ fn parse_range(header: Option<&str>, total: u64) -> Option<(u64, u64)> {
         RangeParse::Partial(start, end) => Some((start, end)),
         RangeParse::Unsatisfiable => None,
     }
+}
+
+/// `hermes-media://remote/<encoded path>?connectionId=..&profile=..`
+///
+/// A remote gateway (an SSH box, a cloud profile) exposes no static token to
+/// the page, so the renderer cannot point a media tag at it directly. Rust
+/// resolves the owning connection, mints a grant and forwards the request —
+/// including `Range`, so seeking still works — and hands back the bytes.
+fn remote_media_response(tail: &str, range_header: Option<&str>) -> tauri::http::Response<Vec<u8>> {
+    let fail = |status: u16, message: &str| {
+        tauri::http::Response::builder()
+            .status(status)
+            .header("content-type", "text/plain")
+            .body(message.as_bytes().to_vec())
+            .unwrap()
+    };
+
+    let (raw, query) = tail.split_once('?').unwrap_or((tail, ""));
+    let path = urlencoding::decode(raw)
+        .map(|p| p.into_owned())
+        .unwrap_or_else(|_| raw.to_string());
+    if path.is_empty() {
+        return fail(400, "remote media: no path");
+    }
+
+    let mut profile: Option<String> = None;
+    let mut connection_id: Option<String> = None;
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = urlencoding::decode(value)
+            .map(|v| v.into_owned())
+            .unwrap_or_default();
+        match key {
+            "profile" if !value.is_empty() => profile = Some(value),
+            "connectionId" if !value.is_empty() => connection_id = Some(value),
+            _ => {}
+        }
+    }
+
+    let home = crate::hermes_home();
+    let owner = match crate::commands::resolve_owner(
+        &home,
+        &json!({ "connectionId": connection_id, "profile": profile }),
+    ) {
+        Ok(owner) => owner,
+        Err(error) => return fail(502, &format!("remote media: {error}")),
+    };
+    let ticket = match owner.mint("media") {
+        Ok(ticket) => ticket,
+        Err(error) => return fail(502, &format!("remote media: {error}")),
+    };
+    let url = format!(
+        "{}/api/files/stream?path={}",
+        owner.connection.base_url.trim_end_matches('/'),
+        urlencoding::encode(&path)
+    );
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let mut request = agent
+        .request("GET", &url)
+        .set("X-Hermes-Gateway-Ticket", &ticket);
+    if let Some(range) = range_header {
+        request = request.set("Range", range);
+    }
+    if !owner.connection.token.is_empty() {
+        request = request.set(
+            "Authorization",
+            &format!("Bearer {}", owner.connection.token),
+        );
+    }
+
+    let response = match request.call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(416, _)) => return fail(416, "range not satisfiable"),
+        Err(ureq::Error::Status(code, _)) => {
+            return fail(code, &format!("remote media: gateway answered {code}"))
+        }
+        Err(error) => return fail(502, &format!("remote media: {error}")),
+    };
+
+    let status = response.status();
+    let mime = response
+        .header("content-type")
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let content_range = response.header("content-range").map(str::to_string);
+    let mut bytes = Vec::new();
+    if std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes).is_err() {
+        return fail(502, "remote media: read failed");
+    }
+
+    let mut builder = tauri::http::Response::builder()
+        .status(status)
+        .header("content-type", mime)
+        .header("accept-ranges", "bytes")
+        .header("access-control-allow-origin", "*");
+    if let Some(range) = content_range {
+        builder = builder.header("content-range", range);
+    }
+    builder.body(bytes).unwrap()
 }
 
 #[tauri::command]
@@ -1356,11 +1462,29 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_file_is_404_and_a_bad_host_is_501() {
+    fn a_missing_file_is_404_and_an_unknown_host_is_501() {
         assert_eq!(
             media_response("hermes-media://stream/%2Fdefinitely%2Fnot%2Fhere", None).status(),
             404
         );
-        assert_eq!(media_response("hermes-media://remote/x", None).status(), 501);
+        assert_eq!(media_response("hermes-media://nonsense/x", None).status(), 501);
+    }
+
+    #[test]
+    fn remote_media_reports_an_unreachable_gateway_instead_of_claiming_success() {
+        // No gateway is reachable in a unit test, so the honest answer is a
+        // gateway error — never a 200 with empty bytes, which a player would
+        // read as a zero-length clip.
+        let response = media_response("hermes-media://remote/%2Ftmp%2Fa.mp3", None);
+        assert!(
+            response.status() == 502 || response.status() == 400,
+            "unexpected status {}",
+            response.status()
+        );
+    }
+
+    #[test]
+    fn a_remote_uri_without_a_path_is_a_client_error() {
+        assert_eq!(media_response("hermes-media://remote/", None).status(), 400);
     }
 }

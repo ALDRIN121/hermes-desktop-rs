@@ -9,6 +9,7 @@
 //! protocol.
 
 mod commands;
+mod desktop_ops;
 mod fs_ops;
 mod gateway_ws;
 mod git_ops;

@@ -96,3 +96,24 @@ test('the shell provides requestIdleCallback where WebKit omits it', async () =>
   for (const callback of h.timers) callback()
   assert.deepEqual(fired, ['ran'])
 })
+
+test('the desktop surface the renderer calls is present and routes to its channel', async () => {
+  const h = harness(), desktop = h.window.hermesDesktop
+  // Members whose absence silently disabled a feature: a link that would not
+  // open, a locale probe that never answered, media with no save path.
+  for (const member of ['openExternal', 'getMachineProfile', 'sshResolveHost',
+    'saveGatewayFile', 'saveImageFromUrl', 'normalizePreviewTarget', 'watchPreviewFile',
+    'repairBootstrap']) {
+    assert.equal(typeof desktop[member], 'function', `missing ${member}`)
+  }
+  for (const member of ['getDefaultProjectDir', 'setDefaultProjectDir', 'pickDefaultProjectDir']) {
+    assert.equal(typeof desktop.settings[member], 'function', `missing settings.${member}`)
+  }
+  assert.equal(typeof desktop.themes.fetchMarketplace, 'function')
+  assert.equal(typeof desktop.preparedSubmissions.read, 'function')
+
+  // Open External must forward the url verbatim, not a rebuilt one.
+  await desktop.openExternal('https://example.com/a?b=c')
+  const open = h.calls.find(x => x.args.channel === 'hermes:openExternal')
+  assert.equal(open.args.args[0], 'https://example.com/a?b=c')
+})

@@ -45,6 +45,23 @@ async fn resolve_native_async(
         .map_err(|e| e.to_string())?
 }
 
+/// Scope-checked owner resolution for the desktop file bridge: a payload names
+/// a connection and profile the same way a REST request does, so the same
+/// local-only rule applies.
+pub fn resolve_owner(
+    home: &Path,
+    payload: &Value,
+) -> Result<native_gateway::NativeGateway, String> {
+    scope::require_local_connection(payload.get("connectionId"))?;
+    let profile = scope::profile_name(
+        payload
+            .get("profile")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    )?;
+    native_gateway::resolve(home, profile.as_deref())
+}
+
 fn owned_api_call(home: &Path, mut request: HermesApiRequest) -> Result<Value, String> {
     scope::require_local_connection(request.connection_id.as_ref())?;
     let route = scope::route_http(
@@ -181,7 +198,7 @@ pub fn load_preferences(home: &Path) -> UiPreferences {
         .unwrap_or_default()
 }
 
-fn save_preferences(home: &Path, prefs: &UiPreferences) -> Result<(), String> {
+pub fn save_preferences(home: &Path, prefs: &UiPreferences) -> Result<(), String> {
     let path = preferences_path(home);
     let body = serde_json::to_vec_pretty(prefs).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
@@ -1009,6 +1026,86 @@ pub async fn hermes_ipc(
         }
 
         "hermes:notify" => Ok(Value::Bool(system_ops::notify(&arg(&args, 0)))),
+
+        // --- desktop surface the renderer calls directly --------------------
+        "hermes:openExternal" => {
+            let url = arg(&args, 0).as_str().unwrap_or_default().to_string();
+            tauri::async_runtime::spawn_blocking(move || crate::desktop_ops::open_external(&url))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+
+        "hermes:machine:profile" => Ok(crate::desktop_ops::machine_profile()),
+
+        "hermes:ssh-config:resolve" => {
+            let host = arg(&args, 0).as_str().unwrap_or_default().to_string();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::desktop_ops::ssh_resolve_host(&host)
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
+
+        "hermes:setting:defaultProjectDir:get" => {
+            Ok(crate::desktop_ops::get_default_project_dir(&state.home))
+        }
+
+        "hermes:setting:defaultProjectDir:set" => crate::desktop_ops::set_default_project_dir(
+            &state.home,
+            arg(&args, 0).as_str().unwrap_or_default(),
+        ),
+
+        "hermes:setting:defaultProjectDir:pick" => {
+            crate::desktop_ops::pick_default_project_dir(&state.home)
+        }
+
+        "hermes:saveGatewayFile" => {
+            let home = state.home.clone();
+            let payload = arg(&args, 0);
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::desktop_ops::save_gateway_file(&home, &payload)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+
+        "hermes:saveImageFromUrl" => {
+            let url = arg(&args, 0).as_str().unwrap_or_default().to_string();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::desktop_ops::save_image_from_url(&url)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+
+        "hermes:normalizePreviewTarget" => {
+            let target = arg(&args, 0).as_str().unwrap_or_default().to_string();
+            let base = arg(&args, 1).as_str().map(str::to_string);
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::desktop_ops::normalize_preview_target(&target, base.as_deref())
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
+
+        "hermes:watchPreviewFile" => {
+            let url = arg(&args, 0).as_str().unwrap_or_default().to_string();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::desktop_ops::watch_preview_file(&url)
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
+
+        // Bootstrap repair is an installer concern; this shell attaches to a
+        // gateway it did not install, so there is nothing to repair.
+        "hermes:bootstrap:repair" => Ok(json!({ "ok": true, "repaired": false })),
+
+        "hermes:prepared-submissions:read" => Ok(json!({ "submissions": [] })),
+
+        "hermes:vscode-theme:fetch" | "hermes:vscode-theme:search" => {
+            Ok(json!({ "ok": false, "error": "theme marketplace is not available in the Rust shell" }))
+        }
 
         other => Err(format!("unimplemented:{other}")),
     }

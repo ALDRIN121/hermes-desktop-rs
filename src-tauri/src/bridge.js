@@ -132,6 +132,34 @@
 
     getVersion: (scope) => call('hermes:version', [scope]),
 
+    // --- desktop surface -----------------------------------------------------
+    // Links, machine facts, SSH and the gateway file bridge. Each maps to the
+    // same channel the Electron main process registered, so the renderer's
+    // existing call sites work unchanged.
+    openExternal: (url) => call('hermes:openExternal', [url]),
+    getMachineProfile: () => call('hermes:machine:profile'),
+    sshResolveHost: (host) => call('hermes:ssh-config:resolve', [host]),
+    settings: {
+      getDefaultProjectDir: () => call('hermes:setting:defaultProjectDir:get'),
+      setDefaultProjectDir: (dir) => call('hermes:setting:defaultProjectDir:set', [dir]),
+      pickDefaultProjectDir: () => call('hermes:setting:defaultProjectDir:pick')
+    },
+    saveGatewayFile: (payload) => call('hermes:saveGatewayFile', [payload]),
+    saveImageFromUrl: (url) => call('hermes:saveImageFromUrl', [url]),
+    normalizePreviewTarget: (target, baseDir) => call('hermes:normalizePreviewTarget', [target, baseDir]),
+    watchPreviewFile: (url) => call('hermes:watchPreviewFile', [url]),
+    repairBootstrap: () => call('hermes:bootstrap:repair'),
+    preparedSubmissions: { read: () => call('hermes:prepared-submissions:read') },
+    themes: {
+      fetchMarketplace: (id) => call('hermes:vscode-theme:fetch', [id]),
+      searchMarketplace: (query) => call('hermes:vscode-theme:search', [query])
+    },
+
+    // Staging a dropped file is a bytes operation the renderer can do itself
+    // (it already holds the File), but the Electron shape returns the staged
+    // path. Announce absence rather than a path that was never written.
+    getPathForFile: () => '',
+
     // --- filesystem, dialogs, clipboard --------------------------------------
     readFileText: (filePath) => call('hermes:readFileText', [filePath]),
     readFileDataUrl: (filePath) => call('hermes:readFileDataUrl', [filePath]),
